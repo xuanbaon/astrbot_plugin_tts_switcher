@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "display_name": "TTS Voice Switcher"
+  },
+  "views": {
+    "voice_console": {
+      "title": "Voice Console"
+    }
+  },
+  "pages": {
+    "voice_console": {
+      "title": "Voice Console"
+    }
+  }
+}

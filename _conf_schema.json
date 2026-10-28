@@ -1,0 +1,394 @@
+{
+  "enabled": {
+    "description": "启用 TTS 声线切换",
+    "type": "bool",
+    "default": true,
+    "hint": "关掉之后 /tts 指令完全不响应，已经设好的会话偏好保持原样。"
+  },
+  "voices_auto_load": {
+    "description": "自动读取模型供应商的声线",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后启动时扫描「模型供应商」里所有文字转语音提供商，把还没有对应声线的自动加进来；关掉后完全手动维护，面板里的「启动时自动加载」也是这个开关。"
+  },
+  "access": {
+    "description": "权限控制",
+    "type": "object",
+    "items": {
+      "allow_all": {
+        "description": "允许所有人切换",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时只有 AstrBot 管理员和下面填的额外管理员能换声线。群里人多的时候建议保持关闭。"
+      },
+      "extra_admins": {
+        "description": "额外管理员",
+        "type": "string",
+        "default": "",
+        "hint": "填 QQ 号，多个用半角逗号 , 分隔（全角 ， 也认）。即使不是 AstrBot 管理员也能换声线。"
+      },
+      "allow_group": {
+        "description": "允许在群聊里用",
+        "type": "bool",
+        "default": true
+      },
+      "allow_private": {
+        "description": "允许在私聊里用",
+        "type": "bool",
+        "default": true
+      },
+      "auto_enable": {
+        "description": "切换时自动打开本会话语音",
+        "type": "bool",
+        "default": true,
+        "hint": "如果之前用 /tts 关闭 关过语音，切换声线时会顺手打开，省得切了却没声音。"
+      }
+    }
+  },
+  "say": {
+    "description": "/说 指令（用声线念一句话）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用 /说 指令",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉之后 /说 完全不响应，/tts 不受影响。"
+      },
+      "allow_all": {
+        "description": "允许所有人使用",
+        "type": "bool",
+        "default": true,
+        "hint": "打开时群里谁都能发 /说。它只念一句话、不改当前声线设置，所以默认放开；关掉则只有管理员可用。"
+      },
+      "nl_enable": {
+        "description": "支持自然语言触发",
+        "type": "bool",
+        "default": false,
+        "hint": "打开后，@机器人 说「用示例的声音说 今天风很好」也能念。默认关闭，避免误触发。"
+      },
+      "voices": {
+        "description": "允许的声线白名单",
+        "type": "string",
+        "default": "",
+        "hint": "留空表示不限制。填名字或别名，多个用半角逗号 , 或全角逗号 ， 分隔，例如：示例,示例B。不在名单里的声线会被拒绝。"
+      },
+      "max_chars": {
+        "description": "单次最多念多少字",
+        "type": "int",
+        "default": 200,
+        "hint": "超出会截断，避免一条指令合成出十分钟语音。填 0 表示不限制。"
+      },
+      "cooldown": {
+        "description": "冷却秒数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一个人两次 /说 之间的最小间隔，防止刷屏。填 0 关闭冷却。"
+      },
+      "timeout": {
+        "description": "合成超时（秒）",
+        "type": "int",
+        "default": 90,
+        "hint": "本地 GPT-SoVITS 首句要加载模型，别调太小；超过这个时间就当失败并提示。"
+      },
+      "append_text": {
+        "description": "语音后面再发一遍文字",
+        "type": "bool",
+        "default": false,
+        "hint": "方便对方复制原标题，但会多一条消息。"
+      },
+      "notice_truncate": {
+        "description": "被截断时提醒一句",
+        "type": "bool",
+        "default": true
+      },
+      "allow_group": {
+        "description": "允许在群聊里用",
+        "type": "bool",
+        "default": true
+      },
+      "allow_private": {
+        "description": "允许在私聊里用",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "answer": {
+    "description": "/答 指令（用指定声线回复一句话）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用 /答 指令",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉之后 /答 不响应；/tts、/说 不受影响。"
+      },
+      "allow_all": {
+        "description": "允许所有人使用",
+        "type": "bool",
+        "default": true,
+        "hint": "打开时群里谁都能发 /答 让机器人用某个声线回一句。它不改会话的声线设置，所以默认放开；关掉则只有管理员可用。"
+      },
+      "voices": {
+        "description": "允许的声线白名单",
+        "type": "string",
+        "default": "",
+        "hint": "留空表示不限制。填名字或别名，多个用半角逗号 , 或全角逗号 ， 分隔，例如：示例,示例B。不在名单里的声线会被拒绝。"
+      },
+      "cooldown": {
+        "description": "冷却秒数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一个人两次 /答 之间的最小间隔，防止刷屏。填 0 关闭冷却。"
+      },
+      "segment_chars": {
+        "description": "每条语音最多多少字",
+        "type": "int",
+        "default": 200,
+        "hint": "回复太长时会按句末标点切成多条语音依次发出，切成多大由这里决定。填 0 表示不切。"
+      },
+      "timeout": {
+        "description": "合成超时（秒）",
+        "type": "int",
+        "default": 120,
+        "hint": "本地 GPT-SoVITS 首句要加载模型，别调太小；超过这个时间就退回发文字。"
+      },
+      "expire": {
+        "description": "等待回复的最长时间（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "超过这个时间大模型还没出回复，这次 /答 就作废，回复照常走原来的语音设置。"
+      },
+      "allow_group": {
+        "description": "允许在群聊里用",
+        "type": "bool",
+        "default": true
+      },
+      "allow_private": {
+        "description": "允许在私聊里用",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "help": {
+    "description": "帮助集成",
+    "type": "object",
+    "items": {
+      "inject_into_help": {
+        "description": "在 /help 里附上本插件指令",
+        "type": "bool",
+        "default": true,
+        "hint": "AstrBot 自带的 /help 只列内置指令，打开后会在末尾追加 /tts、/ttshelp、/说、/答 的用法。"
+      },
+      "inject_text": {
+        "description": "追加到 /help 的文本",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置摘要。"
+      }
+    }
+  },
+  "voices": {
+    "description": "声线映射",
+    "type": "template_list",
+    "hint": "每条对应一个名字。名字是你聊天里要打的那个词，比如填「示例」，群里发 /tts 示例 就切过去。提供商 ID 可以先在群里发 /tts 引擎 查，也可以直接在 WebUI 左侧「拓展功能 → 声线控制台」里点「加载」，页面会把模型供应商里的语音合成提供商和它们的音色读出来自动填好。",
+    "templates": {
+      "voice": {
+        "name": "声线",
+        "items": {
+          "name": {
+            "description": "名字",
+            "type": "string",
+            "default": "",
+            "hint": "指令里用的词，建议短一点，例如：示例、通义、示例C。"
+          },
+          "provider_id": {
+            "description": "TTS 提供商",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider_tts",
+            "hint": "选一个已启用的语音合成提供商。下拉里没有的话，说明那个 provider 还没建好或者没启用。"
+          },
+          "voice": {
+            "description": "供应商音色",
+            "type": "string",
+            "default": "",
+            "hint": "同一提供商里有多档音色时才需要填（面板「供应商声线」会自动填好）。留空表示跟随提供商当前音色。"
+          },
+          "alias": {
+            "description": "别名",
+            "type": "string",
+            "default": "",
+            "hint": "可选，多个用半角逗号 , 或全角逗号 ， 分隔，例如：示例1,diyin,本地。"
+          },
+          "note": {
+            "description": "备注",
+            "type": "string",
+            "default": "",
+            "hint": "随便写，只给人看。会显示在 /tts 列表 和 /tts 状态 里，用来区分同名的几个声线（比如平台、模型、语气）。"
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          }
+        }
+      }
+    },
+    "default": []
+  },
+  "list": {
+    "description": "列表显示",
+    "type": "object",
+    "items": {
+      "show_provider_id": {
+        "description": "列表里带上提供商 ID",
+        "type": "bool",
+        "default": true,
+        "hint": "打开时 /tts 列表 会显示每个名字对应的 provider id，方便对照配置。"
+      },
+      "forward": {
+        "description": "长列表用合并转发发送",
+        "type": "bool",
+        "default": true,
+        "hint": "/tts 列表 超过「一条消息最多多少字」时，切成多段装进合并转发（聊天记录）里发，不再被截断。关掉就改成分几条普通消息发。"
+      },
+      "single_max": {
+        "description": "一条消息最多多少字",
+        "type": "int",
+        "default": 600,
+        "hint": "列表正文不超过这个字数就直接一条消息发完，超过才走合并转发。"
+      },
+      "forward_rows": {
+        "description": "合并转发每段放多少条声线",
+        "type": "int",
+        "default": 40,
+        "hint": "一个转发节点（聊天记录里的一条）放多少条声线，120 条声线按 40 分就是 3 段。"
+      }
+    }
+  },
+  "texts": {
+    "description": "自定义回复",
+    "type": "object",
+    "items": {
+      "reply_switched": {
+        "description": "切换成功",
+        "type": "string",
+        "default": "已切换到 {name}（{provider}）。",
+        "hint": "可用变量：{name} 声线名字、{provider} 提供商 ID。"
+      },
+      "reply_unknown": {
+        "description": "名字不认识",
+        "type": "string",
+        "default": "",
+        "hint": "留空用内置文案（会附上可用名字列表）。"
+      },
+      "reply_denied": {
+        "description": "没有权限",
+        "type": "string",
+        "default": "只有管理员能换声线。"
+      },
+      "reply_scope_denied": {
+        "description": "当前场景不允许",
+        "type": "string",
+        "default": "这里不让换声线。"
+      },
+      "reply_tts_on": {
+        "description": "语音开启",
+        "type": "string",
+        "default": "本会话语音已开启。"
+      },
+      "reply_tts_off": {
+        "description": "语音关闭",
+        "type": "string",
+        "default": "本会话语音已关闭，之后只发文字。"
+      },
+      "reply_reset": {
+        "description": "恢复默认",
+        "type": "string",
+        "default": "已清掉本会话的声线设置，回到全局默认（{provider}）。",
+        "hint": "可用变量：{provider} 恢复后实际生效的提供商 ID。"
+      },
+      "help": {
+        "description": "帮助文本",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置帮助。"
+      },
+      "help_say": {
+        "description": "/说 的帮助文本",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置帮助。"
+      },
+      "help_answer": {
+        "description": "/答 的帮助文本",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置帮助。"
+      },
+      "help_all": {
+        "description": "/ttshelp 的完整说明",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置说明。/ttshelp 和 /tts 帮助 都读这一段。"
+      },
+      "reply_answer_denied": {
+        "description": "/答 没有权限",
+        "type": "string",
+        "default": "只有管理员能用 /答。"
+      },
+      "reply_answer_scope_denied": {
+        "description": "/答 当前场景不允许",
+        "type": "string",
+        "default": "这里不让用 /答。"
+      },
+      "reply_answer_unknown_voice": {
+        "description": "/答 没找到声线",
+        "type": "string",
+        "default": "没找到声线「{name}」。用 /tts 列表 看看有哪些。",
+        "hint": "可用变量：{name} 你写的那个名字。"
+      },
+      "reply_answer_empty": {
+        "description": "/答 没给正文",
+        "type": "string",
+        "default": "要回复什么？例如：/答=示例 今天天气怎么样"
+      },
+      "reply_answer_no_provider": {
+        "description": "/答 找不到提供商",
+        "type": "string",
+        "default": "声线「{name}」对应的提供商没在跑（{provider}）。",
+        "hint": "可用变量：{name} 声线名字、{provider} 提供商 ID。"
+      },
+      "reply_say_denied": {
+        "description": "/说 没有权限",
+        "type": "string",
+        "default": "只有管理员能用 /说。"
+      },
+      "reply_say_scope_denied": {
+        "description": "/说 当前场景不允许",
+        "type": "string",
+        "default": "这里不让用 /说。"
+      },
+      "reply_say_unknown_voice": {
+        "description": "/说 没找到声线",
+        "type": "string",
+        "default": "没找到声线「{name}」。用 /tts 列表 看看有哪些。",
+        "hint": "可用变量：{name} 你写的那个名字。"
+      },
+      "reply_say_empty": {
+        "description": "/说 没给正文",
+        "type": "string",
+        "default": "要念什么？例如：/说=示例 今天风很好"
+      },
+      "reply_say_no_provider": {
+        "description": "/说 找不到提供商",
+        "type": "string",
+        "default": "声线「{name}」对应的提供商没在跑（{provider}）。",
+        "hint": "可用变量：{name} 声线名字、{provider} 提供商 ID。"
+      }
+    }
+  }
+}
