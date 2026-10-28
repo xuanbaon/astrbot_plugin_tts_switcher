@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """TTS 声线切换 —— 在聊天里一句话换掉当前会话使用的 TTS 提供商。
 
 AstrBot 的"会话级 TTS"本来只能在面板里逐个会话点选，日常在群里想换个声音
@@ -52,6 +51,7 @@ except Exception:  # pragma: no cover
 
     class GreedyStr(str):  # type: ignore[no-redef]
         pass
+
 
 try:
     from astrbot.core import sp
@@ -193,7 +193,6 @@ NL_SAY_RE = re.compile(
     r"(?:来)?(?:说|念|读|讲|回复|复述)[:：,，]?\s*(?P<text>.{1,})$",
     re.S,
 )
-
 
 
 # ---------------------------------------------------------------- 小工具
@@ -346,9 +345,10 @@ class TTSSwitcher(Star):
 
     async def terminate(self) -> None:
         help_cls = _help_command_class()
-        if help_cls is not None and getattr(
-            help_cls, "_tts_switcher_provider", None
-        ) is self:
+        if (
+            help_cls is not None
+            and getattr(help_cls, "_tts_switcher_provider", None) is self
+        ):
             help_cls._tts_switcher_provider = None
 
     # ------------------------------------------------------------ 配置
@@ -745,9 +745,7 @@ class TTSSwitcher(Star):
             return
 
         if not self._can_use(event):
-            yield event.plain_result(
-                self._msg("reply_denied", "只有管理员能换声线。")
-            )
+            yield event.plain_result(self._msg("reply_denied", "只有管理员能换声线。"))
             return
 
         raw = re.sub(r"\s+", " ", str(args or "")).strip()
@@ -1034,7 +1032,9 @@ class TTSSwitcher(Star):
         for attempt in range(1, SAY_MAX_ATTEMPT + 1):
             audio = ""
             try:
-                audio = await asyncio.wait_for(provider.get_audio(text), timeout=timeout)
+                audio = await asyncio.wait_for(
+                    provider.get_audio(text), timeout=timeout
+                )
             except asyncio.TimeoutError:
                 last_error = f"合成超时（超过 {int(timeout)} 秒）"
             except Exception as exc:
@@ -1117,7 +1117,9 @@ class TTSSwitcher(Star):
             return
 
         if not self._say_allowed(event):
-            await self._say_send(event, self._msg("reply_say_denied", "只有管理员能用 /说。"))
+            await self._say_send(
+                event, self._msg("reply_say_denied", "只有管理员能用 /说。")
+            )
             return
 
         umo = str(getattr(event, "unified_msg_origin", "") or "")
@@ -1129,7 +1131,9 @@ class TTSSwitcher(Star):
 
         left = self._say_cooldown_left(key)
         if left > 0:
-            await self._say_send(event, f"慢一点，{max(1, int(left + 0.999))} 秒后再来。")
+            await self._say_send(
+                event, f"慢一点，{max(1, int(left + 0.999))} 秒后再来。"
+            )
             return
 
         voices = self._voices()
@@ -1147,9 +1151,7 @@ class TTSSwitcher(Star):
                 return
             if ambiguous:
                 names = "、".join(v["name"] for v in ambiguous[:10])
-                await self._say_send(
-                    event, f"这名字能对上好几个，写全一点：\n{names}"
-                )
+                await self._say_send(event, f"这名字能对上好几个，写全一点：\n{names}")
                 return
         else:
             # 命令行写法：不解析声线，整段都是正文
@@ -1309,9 +1311,7 @@ class TTSSwitcher(Star):
                 return
             if ambiguous:
                 names = "、".join(v["name"] for v in ambiguous[:10])
-                yield event.plain_result(
-                    f"这名字能对上好几个，写全一点：\n{names}"
-                )
+                yield event.plain_result(f"这名字能对上好几个，写全一点：\n{names}")
                 return
         else:
             # 命令行写法：不解析声线，整段都是正文
@@ -1521,9 +1521,7 @@ class TTSSwitcher(Star):
         except Exception as exc:
             logger.error(f"[tts_switcher] 写入 TTS 开关失败: {exc}", exc_info=True)
 
-    async def _toggle(
-        self, event: AstrMessageEvent, umo: str, enabled: bool
-    ) -> str:
+    async def _toggle(self, event: AstrMessageEvent, umo: str, enabled: bool) -> str:
         if sp is None:
             return "这个 AstrBot 版本没有 shared_preferences，改不了会话开关。"
         await self._set_enabled(umo, enabled)

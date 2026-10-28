@@ -29,7 +29,7 @@ help: |-
   名字怎么找：完全对应优先；没有就模糊搜，同一条声线的不同档（flash/plus）取靠前那个，
   命中多个不同名字会让你写全，都没命中才提示「没找到声线」
   WebUI 左侧「拓展功能 → 声线控制台」可以自动加载供应商声线，并改名字、别名、备注和指令参数
-version: v1.4.6
+version: v1.4.7
 author: 示例 & DeepSeek-V4.1-flash
 repo: https://github.com/xuanbaon/astrbot_plugin_tts_switcher
 entry: main

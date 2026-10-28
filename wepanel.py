@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """WebUI 面板后端：给「TTS 声线切换」插件页面提供读写声线与指令设置的接口。
 
 页面本身放在 pages/voice_console/ 下，通过 AstrBot 的插件页面桥
@@ -281,7 +280,9 @@ def _catalog_snapshot(plugin: Any) -> list[dict]:
         for key, value in cfg.items():
             if _is_voice_key(key):
                 for item in _str_values(value):
-                    voices.append({"key": key, "value": item, "label": _short_voice(item)})
+                    voices.append(
+                        {"key": key, "value": item, "label": _short_voice(item)}
+                    )
             elif _is_identity_key(key):
                 text = str(value or "").strip()
                 if text:
@@ -431,7 +432,9 @@ def _merge_voices(base_rows: list[dict], pending: list[dict]) -> tuple[list[dict
         rows.append(
             {
                 "__template_key": "voice",
-                "name": _unique_name(item.get("label") or item.get("provider_id"), used),
+                "name": _unique_name(
+                    item.get("label") or item.get("provider_id"), used
+                ),
                 "provider_id": item["provider_id"],
                 "voice": item.get("voice") or "",
                 "alias": "",
