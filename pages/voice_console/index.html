@@ -793,12 +793,60 @@
         });
       }
 
+      function knownProviderIds() {
+        const known = new Set();
+        (state.catalog || []).forEach((row) => {
+          if (row && row.id) known.add(String(row.id).toLowerCase());
+        });
+        Object.keys(state.providerEnable || {}).forEach((id) => known.add(String(id).toLowerCase()));
+        (state.providers || []).forEach((p) => {
+          if (p && p.id) known.add(String(p.id).toLowerCase());
+        });
+        return known;
+      }
+
+      // 按「配置里的声线」和「现有供应商」重新算一遍失效项：
+      // 删掉某条声线、把它改绑到别的提供商之后，这张卡片要立刻跟着变，不能等刷新页面。
+      function recomputeOrphans() {
+        const known = knownProviderIds();
+        if (!known.size) return state.orphans || [];
+        state.orphans = state.voices
+          .filter((v) => {
+            const pid = String(v.provider_id || "").trim();
+            return pid && !known.has(pid.toLowerCase());
+          })
+          .map((v) => ({ name: v.name, provider_id: v.provider_id, voice: v.voice || "" }));
+        return state.orphans;
+      }
+
+      function bindTargetOptions() {
+        const options = new Map();
+        (state.providers || []).forEach((p) => options.set(p.id, p.name || p.id));
+        (state.catalog || []).forEach((row) => {
+          if (row && row.id && !options.has(row.id)) options.set(row.id, row.name || row.id);
+        });
+        return Array.from(options.entries()).map(([id, name]) => ({ id, name }));
+      }
+
       function renderOrphans() {
-        const list = state.orphans || [];
+        const list = recomputeOrphans();
         orphanCard.hidden = !list.length;
         orphanBody.replaceChildren();
         if (!list.length) return;
-        orphanBanner.textContent = `有 ${list.length} 条声线绑定的提供商已经不存在，可能是供应商被改名或删掉了`;
+        const saved = state.dirty ? "（改动还没保存，点「保存并生效」之后才真正写进配置）" : "";
+        orphanBanner.textContent =
+          `有 ${list.length} 条声线绑定的提供商已经不存在（被改名或删掉了）：` +
+          `改绑到现有提供商，或者直接删掉这几条${saved}`;
+
+        const tip = document.createElement("div");
+        tip.className = "muted";
+        tip.style.marginBottom = "8px";
+        tip.textContent =
+          "刚在「模型供应商」里删完？先点上方「从磁盘重新读取」刷新一次供应商清单；" +
+          "这里的删掉 / 改绑都是先改内存，点「保存并生效」才写进配置文件。";
+        orphanBody.append(tip);
+
+        const targets = bindTargetOptions();
         list.forEach((item) => {
           const row = document.createElement("div");
           row.className = "orphan-row";
@@ -818,7 +866,7 @@
           empty.value = "";
           empty.textContent = "改绑到…";
           select.append(empty);
-          (state.providers || []).forEach((p) => {
+          targets.forEach((p) => {
             const opt = document.createElement("option");
             opt.value = p.id;
             opt.textContent = p.id === p.name ? p.id : `${p.id}（${p.name}）`;
@@ -837,16 +885,47 @@
             if (!target) return;
             target.provider_id = select.value;
             target.voice = "";
-            item.provider_id = select.value;
             markDirty();
             render();
+            renderCatalog();
             renderOrphans();
-            toast(`已改绑 ${item.name}，记得保存`);
+            toast(`已改绑 ${item.name}，点「保存并生效」后写入配置`);
           };
 
-          row.append(name, from, select, btn);
+          const delBtn = document.createElement("button");
+          delBtn.className = "ghost small";
+          delBtn.textContent = "删掉";
+          delBtn.onclick = () => {
+            const index = state.voices.findIndex((v) => v.name === item.name);
+            if (index >= 0) state.voices.splice(index, 1);
+            markDirty();
+            render();
+            renderCatalog();
+            renderOrphans();
+            toast(`已删掉声线 ${item.name}，点「保存并生效」后写入配置`);
+          };
+
+          row.append(name, from, select, btn, delBtn);
           orphanBody.append(row);
         });
+
+        const footer = document.createElement("div");
+        footer.style.marginTop = "8px";
+        const purge = document.createElement("button");
+        purge.className = "ghost small";
+        purge.textContent = `全部删掉（${list.length} 条）`;
+        purge.onclick = () => {
+          const names = new Set(list.map((item) => item.name));
+          const before = state.voices.length;
+          state.voices = state.voices.filter((v) => !names.has(v.name));
+          markDirty();
+          render();
+          renderCatalog();
+          renderOrphans();
+          toast(`已删掉 ${before - state.voices.length} 条失效声线，点「保存并生效」后写入配置`);
+        };
+        footer.append(purge);
+        orphanBody.append(footer);
       }
 
       function render() {
@@ -966,6 +1045,8 @@
             markDirty();
             render();
             renderCatalog();
+            renderOrphans();
+            toast(`已删掉声线 ${voice.name}，点「保存并生效」后写入配置`);
           };
           tdOps.append(sayBtn, previewBtn, delBtn);
 
