@@ -199,6 +199,16 @@
       }
       .banner.tip .close-tip:hover { color: var(--text); }
       .orphan-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .port-group { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+      .port-group:last-child { margin-bottom: 0; }
+      .port-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; background: var(--row-hover); }
+      .port-base { font-family: ui-monospace, Consolas, monospace; font-size: 13px; font-weight: 600; }
+      .port-note { padding: 6px 12px 8px; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+      .port-note b { color: var(--text); font-weight: 600; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+      .dot.on { background: var(--ok); }
+      .dot.off { background: var(--text-dim); }
+      .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-dim); }
     </style>
     <!-- AstrBot 会把这个标签改写成带 token 的地址；放在脚本之前，确保 window.AstrBotPluginPage 先就绪 -->
     <script src="/api/plugin/page/bridge-sdk.js"></script>
@@ -222,6 +232,19 @@
       </span>
       <button class="close-tip" id="btnCloseTip" title="不再提示">知道了</button>
     </div>
+
+    <details class="card" id="portCard" open>
+      <summary>端口角色<span class="tag" id="portTag">—</span></summary>
+      <div class="toolbar">
+        <span class="muted">
+          本地语音服务（GPT-SoVITS 等）按端口分组，看这个端口上挂了哪些角色。
+          同一个端口同一时刻只能加载一套权重：核心按配置顺序逐条设置，最后一条生效，其余角色拿不到自己的音色。
+        </span>
+        <span class="spacer"></span>
+        <button class="ghost small" id="btnRefreshPorts">重新探测</button>
+      </div>
+      <div class="card-body" id="portList"></div>
+    </details>
 
     <details class="card">
       <summary>供应商声线（自动读取）<span class="tag" id="catalogTag">—</span></summary>
@@ -411,6 +434,8 @@
         // 「供应商被禁用」和「供应商已经没了」
         providerEnable: {},
         supplierStats: {},
+        // 按 api_base 分组的本地语音端口（每个端口上挂了哪些角色）
+        ports: [],
         dirty: false,
       };
       const tbody = document.getElementById("rows");
@@ -588,6 +613,161 @@
         catalogTag.textContent = pendingCount ? `有 ${pendingCount} 条未加入` : "已全部加入";
         catalogTag.className = "tag" + (pendingCount ? " warn" : " ok");
         document.getElementById("btnLoadAll").disabled = !pendingCount;
+      }
+
+      // ── 端口角色：看每个本地语音端口上挂了哪些角色 ──
+      function renderPorts() {
+        const list = document.getElementById("portList");
+        const tag = document.getElementById("portTag");
+        if (!list) return;
+        list.replaceChildren();
+        const ports = state.ports || [];
+        const roleCount = ports.reduce((n, p) => n + (p.total || 0), 0);
+        if (tag) tag.textContent = `${ports.length} 个端口 / ${roleCount} 个角色`;
+        if (!ports.length) {
+          const empty = document.createElement("div");
+          empty.className = "muted";
+          empty.textContent = "没有配了 api_base 的语音供应商（云端 TTS 不占端口，不会出现在这里）。";
+          list.append(empty);
+          return;
+        }
+
+        ports.forEach((port) => {
+          const box = document.createElement("div");
+          box.className = "port-group";
+
+          // 头部：在线点 + 地址 + 计数
+          const head = document.createElement("div");
+          head.className = "port-head";
+
+          const dot = document.createElement("span");
+          dot.className = "dot " + (port.online ? "on" : "off");
+          dot.title = port.online ? "端口在听" : "端口没在听，合成会失败";
+          head.append(dot);
+
+          const base = document.createElement("span");
+          base.className = "port-base";
+          base.textContent = port.api_base;
+          head.append(base);
+
+          const cnt = document.createElement("span");
+          cnt.className = "tag" + (port.online ? " ok" : "");
+          cnt.textContent = `${port.total} 个角色 · 启用 ${port.enabled_count}`;
+          head.append(cnt);
+
+          if (port.port) {
+            const p = document.createElement("span");
+            p.className = "muted";
+            p.textContent = `端口 ${port.port}`;
+            head.append(p);
+          }
+          box.append(head);
+
+          // 说明：同一端口只能有一套权重
+          const note = document.createElement("div");
+          note.className = "port-note";
+          if (!port.online) {
+            note.append(
+              document.createTextNode("端口没在听：这个服务没启动，挂在上面的角色现在都合不出声音。")
+            );
+          } else if (port.enabled_count > 1) {
+            note.append(document.createTextNode("同一端口只能加载一套权重，当前只有 "));
+            const b = document.createElement("b");
+            b.textContent = port.active || "（尚未设置）";
+            note.append(b);
+            note.append(
+              document.createTextNode(
+                ` 的权重会生效——它排在配置里最后。其余 ${port.enabled_count - 1} 个启用角色会拿到别人的音色。`
+              )
+            );
+          } else if (port.enabled_count === 1) {
+            note.append(document.createTextNode("这个端口只启用了一个角色，权重不会互相覆盖。"));
+          } else {
+            note.append(document.createTextNode("这个端口上的角色都已禁用，现在没有角色会用到它。"));
+          }
+          box.append(note);
+
+          // 角色表
+          const scroll = document.createElement("div");
+          scroll.className = "scroll";
+          const table = document.createElement("table");
+          const thead = document.createElement("thead");
+          const hrow = document.createElement("tr");
+          [
+            ["角色", "180px"],
+            ["提供商 ID", "180px"],
+            ["GPT 权重", ""],
+            ["SoVITS 权重", ""],
+            ["参考音频", ""],
+            ["绑定的声线", ""],
+            ["状态", "110px"],
+          ].forEach(([label, width]) => {
+            const th = document.createElement("th");
+            th.textContent = label;
+            if (width) th.style.width = width;
+            hrow.append(th);
+          });
+          thead.append(hrow);
+          table.append(thead);
+
+          const tbody = document.createElement("tbody");
+          (port.roles || []).forEach((role) => {
+            const tr = document.createElement("tr");
+
+            const nameTd = document.createElement("td");
+            nameTd.textContent = role.provider_id;
+            tr.append(nameTd);
+
+            const pidTd = document.createElement("td");
+            pidTd.className = "mono";
+            pidTd.textContent = role.adapter || "";
+            tr.append(pidTd);
+
+            ["gpt", "sovits", "ref_audio"].forEach((key) => {
+              const td = document.createElement("td");
+              td.className = "mono";
+              td.textContent = role[key] || "—";
+              td.title = role[key] || "";
+              tr.append(td);
+            });
+
+            const voiceTd = document.createElement("td");
+            const names = role.voices || [];
+            if (names.length) {
+              voiceTd.textContent = names.join("、");
+              voiceTd.title = names.join("、");
+            } else {
+              voiceTd.className = "muted";
+              voiceTd.textContent = "（未绑定声线）";
+            }
+            tr.append(voiceTd);
+
+            const stateTd = document.createElement("td");
+            if (!role.enabled) {
+              const t = document.createElement("span");
+              t.className = "tag";
+              t.textContent = "已禁用";
+              stateTd.append(t);
+            } else if (port.active === role.provider_id) {
+              const t = document.createElement("span");
+              t.className = "tag warn";
+              t.textContent = "实际生效";
+              stateTd.append(t);
+            } else {
+              const t = document.createElement("span");
+              t.className = "tag err";
+              t.textContent = "会被覆盖";
+              stateTd.append(t);
+            }
+            tr.append(stateTd);
+
+            tbody.append(tr);
+          });
+          table.append(tbody);
+          scroll.append(table);
+          box.append(scroll);
+          list.append(box);
+        });
       }
 
       function renderOrphans() {
@@ -857,10 +1037,12 @@
         state.orphans = data.orphans || [];
         state.providerEnable = data.provider_enable || {};
         state.supplierStats = data.supplier_stats || {};
+        state.ports = data.ports || [];
         fillSettings();
         render();
         renderCatalog();
         renderOrphans();
+        renderPorts();
       }
 
       function demoState() {
@@ -936,10 +1118,50 @@
           },
         ];
         state.orphans = [{ name: "示例失效", provider_id: "已经删掉的提供商", voice: "" }];
+        state.ports = [
+          {
+            api_base: "http://127.0.0.1:9882",
+            port: 9882,
+            online: false,
+            total: 3,
+            enabled_count: 2,
+            active: "示例-本地-GSV",
+            roles: [
+              {
+                provider_id: "示例-本地-GSV",
+                enabled: true,
+                adapter: "gsv_tts_selfhost",
+                gpt: "role-a-e15.ckpt",
+                sovits: "role-a_e8_s96.pth",
+                ref_audio: "role-a-01.wav",
+                voices: ["示例本地"],
+              },
+              {
+                provider_id: "示例-本地-GSV2",
+                enabled: true,
+                adapter: "gsv_tts_selfhost",
+                gpt: "role-b-e10.ckpt",
+                sovits: "role-b_e8_s96.pth",
+                ref_audio: "role-b-02.wav",
+                voices: [],
+              },
+              {
+                provider_id: "示例-本地-GSV3",
+                enabled: false,
+                adapter: "gsv_tts_selfhost",
+                gpt: "role-c-e12.ckpt",
+                sovits: "role-c_e8_s96.pth",
+                ref_audio: "",
+                voices: [],
+              },
+            ],
+          },
+        ];
         fillSettings();
         render();
         renderCatalog();
         renderOrphans();
+        renderPorts();
         toast("预览模式：没有连上 AstrBot，下面是示例数据");
       }
 
@@ -1036,6 +1258,22 @@
             applyState(data);
             clearDirty();
             toast("供应商清单已刷新");
+          }
+        } catch (error) {
+          toast(String(error.message || error), true);
+        }
+      };
+      document.getElementById("btnRefreshPorts").onclick = async () => {
+        if (isDemo) {
+          toast("预览模式：下面是示例端口数据");
+          return;
+        }
+        try {
+          const data = await bridge.apiGet("panel/state");
+          if (data && data.ok) {
+            state.ports = data.ports || [];
+            renderPorts();
+            toast("端口状态已重新探测");
           }
         } catch (error) {
           toast(String(error.message || error), true);

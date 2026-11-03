@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 
@@ -365,27 +367,22 @@ def _voice_rows(plugin: Any) -> list[dict]:
     return rows
 
 
-def _provider_enable_map(plugin: Any) -> dict[str, bool]:
-    """主配置里所有 TTS 供应商的启用状态（含已被禁用的那些）。
-
-    ``_catalog_snapshot`` 只拿得到「已启用且实例化成功」的供应商，单看它
-    分不清「供应商被禁用」和「供应商已被删掉」，于是再去主配置里捞一遍，
-    这样面板才能给出准确提示。
-    """
+def _tts_provider_rows(plugin: Any) -> list[dict]:
+    """主配置里所有 TTS 供应商的原始条目（含已被禁用的那些）。"""
     context = getattr(plugin, "context", None)
     getter = getattr(context, "get_config", None)
     if not callable(getter):
-        return {}
+        return []
     try:
         cfg = getter()
     except Exception as exc:  # pragma: no cover - 核心接口异常只降级不报错
         logger.debug(f"[tts_switcher] 读取主配置失败: {exc}")
-        return {}
+        return []
     rows = cfg.get("provider") if isinstance(cfg, dict) else None
     if not isinstance(rows, list):
-        return {}
+        return []
 
-    result: dict[str, bool] = {}
+    result: list[dict] = []
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -393,10 +390,145 @@ def _provider_enable_map(plugin: Any) -> dict[str, bool]:
         adapter = str(item.get("type") or "").strip().lower()
         if ptype != "text_to_speech" and "tts" not in adapter:
             continue
+        result.append(item)
+    return result
+
+
+def _provider_enable_map(plugin: Any) -> dict[str, bool]:
+    """主配置里所有 TTS 供应商的启用状态（含已被禁用的那些）。
+
+    ``_catalog_snapshot`` 只拿得到「已启用且实例化成功」的供应商，单看它
+    分不清「供应商被禁用」和「供应商已被删掉」，于是再去主配置里捞一遍，
+    这样面板才能给出准确提示。
+    """
+    result: dict[str, bool] = {}
+    for item in _tts_provider_rows(plugin):
         pid = str(item.get("id") or "").strip()
         if pid:
             result[pid.lower()] = _as_bool(item.get("enable", True), True)
     return result
+
+
+def _endpoint_port(api_base: str) -> int | None:
+    """从 api_base 里取端口，取不出来返回 None。"""
+    text = str(api_base or "").strip()
+    if not text:
+        return None
+    if "//" not in text:
+        text = f"//{text}"
+    try:
+        parts = urlsplit(text)
+        if parts.port:
+            return int(parts.port)
+        return 443 if parts.scheme == "https" else 80
+    except Exception:
+        return None
+
+
+def _endpoint_online(api_base: str, timeout: float = 0.3) -> bool:
+    """探一下端口是否在听（只为面板显示，超时压得很短，失败当离线）。"""
+    text = str(api_base or "").strip()
+    if not text:
+        return False
+    if "//" not in text:
+        text = f"//{text}"
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or "127.0.0.1"
+        port = _endpoint_port(api_base)
+        if not port:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _is_local_endpoint(api_base: str) -> bool:
+    """只看本机/内网的端口：云端 TTS（dashscope 之类）不占端口，别混进来。"""
+    text = str(api_base or "").strip()
+    if not text:
+        return False
+    if "//" not in text:
+        text = f"//{text}"
+    try:
+        host = (urlsplit(text).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if host.startswith("127.") or host.endswith(".local"):
+        return True
+    if host.startswith(("10.", "192.168.")):
+        return True
+    # 172.16.0.0/12
+    if host.startswith("172."):
+        parts = host.split(".")
+        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            return True
+    return False
+
+
+def _port_roles(plugin: Any) -> list[dict]:
+    """按 api_base（端口）把 TTS 供应商分组，回答「这个端口上挂了哪些角色」。
+
+    同一个 GPT-SoVITS 服务端同一时刻只保留一套权重，而核心是一个 provider
+    一组权重、初始化时逐条 set——所以一个端口上挂多个角色时，只有最后被
+    set 的那个会生效，其余都拿不到自己的音色。面板把这层关系摊开，便于
+    判断哪些角色可以并、哪些必须各起一个端口。
+    """
+    bound: dict[str, list[str]] = {}
+    for row in _voice_rows(plugin):
+        pid = str(row.get("provider_id") or "").strip().lower()
+        if pid:
+            bound.setdefault(pid, []).append(row.get("name") or row.get("provider_id") or pid)
+
+    groups: dict[str, dict] = {}
+    for item in _tts_provider_rows(plugin):
+        base = str(item.get("api_base") or "").strip().rstrip("/")
+        if not base or not _is_local_endpoint(base):
+            continue
+        key = base.lower()
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "api_base": base,
+                "port": _endpoint_port(base),
+                "roles": [],
+                "online": False,
+            }
+        pid = str(item.get("id") or "").strip()
+        parms = item.get("gsv_default_parms")
+        ref_audio = ""
+        if isinstance(parms, dict):
+            ref_audio = str(parms.get("gsv_ref_audio_path") or "")
+        group["roles"].append(
+            {
+                "provider_id": pid,
+                "enabled": _as_bool(item.get("enable", True), True),
+                "adapter": str(item.get("type") or ""),
+                "gpt": os.path.basename(str(item.get("gpt_weights_path") or "")),
+                "sovits": os.path.basename(str(item.get("sovits_weights_path") or "")),
+                "ref_audio": os.path.basename(ref_audio),
+                "voices": bound.get(pid.lower(), []),
+            }
+        )
+
+    for group in groups.values():
+        roles = group["roles"]
+        group["total"] = len(roles)
+        group["enabled_count"] = sum(1 for r in roles if r["enabled"])
+        # 核心按配置顺序逐条初始化，也就是逐条 set 权重，最后一条赢
+        active = ""
+        for role in roles:
+            if role["enabled"] and (role["gpt"] or role["sovits"]):
+                active = role["provider_id"]
+        group["active"] = active
+        group["online"] = _endpoint_online(group["api_base"])
+
+    return sorted(groups.values(), key=lambda g: (-g["total"], str(g["api_base"])))
 
 
 def _annotate_suppliers(
@@ -622,6 +754,7 @@ def register_web_apis(plugin: Any) -> None:
             "voices": voices,
             "supplier_stats": stats,
             "provider_enable": enabled_map,
+            "ports": _port_roles(plugin),
             "settings": _settings_snapshot(plugin),
             "providers": _providers_snapshot(plugin),
             "catalog": catalog,
