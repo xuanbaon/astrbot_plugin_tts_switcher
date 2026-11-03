@@ -365,9 +365,72 @@ def _voice_rows(plugin: Any) -> list[dict]:
     return rows
 
 
+def _provider_enable_map(plugin: Any) -> dict[str, bool]:
+    """主配置里所有 TTS 供应商的启用状态（含已被禁用的那些）。
+
+    ``_catalog_snapshot`` 只拿得到「已启用且实例化成功」的供应商，单看它
+    分不清「供应商被禁用」和「供应商已被删掉」，于是再去主配置里捞一遍，
+    这样面板才能给出准确提示。
+    """
+    context = getattr(plugin, "context", None)
+    getter = getattr(context, "get_config", None)
+    if not callable(getter):
+        return {}
+    try:
+        cfg = getter()
+    except Exception as exc:  # pragma: no cover - 核心接口异常只降级不报错
+        logger.debug(f"[tts_switcher] 读取主配置失败: {exc}")
+        return {}
+    rows = cfg.get("provider") if isinstance(cfg, dict) else None
+    if not isinstance(rows, list):
+        return {}
+
+    result: dict[str, bool] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        ptype = str(item.get("provider_type") or "").strip().lower()
+        adapter = str(item.get("type") or "").strip().lower()
+        if ptype != "text_to_speech" and "tts" not in adapter:
+            continue
+        pid = str(item.get("id") or "").strip()
+        if pid:
+            result[pid.lower()] = _as_bool(item.get("enable", True), True)
+    return result
+
+
+def _annotate_suppliers(
+    voices: list[dict],
+    catalog: list[dict],
+    enable_map: dict[str, bool],
+) -> dict[str, int]:
+    """给每条声线打上供应商状态，并返回各状态计数。
+
+    - ready    供应商有可用实例，能直接切
+    - disabled 供应商还在主配置里，但 enable=false
+    - error    供应商是启用状态，却没加载出实例（初始化失败）
+    - missing  主配置里根本没有这个 id（改名或删掉了）
+    """
+    ready_ids = {str(row.get("id") or "").lower() for row in catalog}
+    stats = {"ready": 0, "disabled": 0, "missing": 0, "error": 0}
+    for item in voices:
+        pid = str(item.get("provider_id") or "").strip().lower()
+        if pid and pid in ready_ids:
+            state_name = "ready"
+        elif pid and pid in enable_map:
+            state_name = "disabled" if not enable_map[pid] else "error"
+        else:
+            state_name = "missing"
+        item["supplier"] = state_name
+        stats[state_name] += 1
+    return stats
+
+
 def _plan_sync(plugin: Any) -> tuple[list[dict], list[dict], list[dict]]:
     """算出「供应商里有、声线列表里还没有」和「声线列表里有、供应商已经没了」。"""
     catalog = _catalog_snapshot(plugin)
+    # 被禁用（或加载失败）的供应商在主配置里仍然存在，不算「已经没了」
+    enabled_map = _provider_enable_map(plugin)
     raw = plugin.config.get("voices")
     voices = [v for v in raw if isinstance(v, dict)] if isinstance(raw, list) else []
 
@@ -378,7 +441,7 @@ def _plan_sync(plugin: Any) -> tuple[list[dict], list[dict], list[dict]]:
             continue
         covered.setdefault(pid, set()).add(str(item.get("voice") or "").strip().lower())
 
-    known_ids = {row["id"].lower() for row in catalog}
+    known_ids = {row["id"].lower() for row in catalog} | set(enabled_map)
     pending: list[dict] = []
     for row in catalog:
         have = covered.get(row["id"].lower(), set())
@@ -549,9 +612,16 @@ def register_web_apis(plugin: Any) -> None:
 
     def _state() -> dict:
         pending, orphans, catalog = _plan_sync(plugin)
+        enabled_map = _provider_enable_map(plugin)
+        # 每条声线标注其供应商的真实状态，别让「供应商已禁用」看起来还能用
+        voices = _voice_rows(plugin)
+        stats = _annotate_suppliers(voices, catalog, enabled_map)
+
         return {
             "ok": True,
-            "voices": _voice_rows(plugin),
+            "voices": voices,
+            "supplier_stats": stats,
+            "provider_enable": enabled_map,
             "settings": _settings_snapshot(plugin),
             "providers": _providers_snapshot(plugin),
             "catalog": catalog,

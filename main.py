@@ -515,6 +515,37 @@ class TTSSwitcher(Star):
                 return provider
         return None
 
+    def _missing_provider_hint(self, wanted: str) -> str:
+        """找不到供应商时，把「被禁用」和「已经没了」区分开说。"""
+        pid = str(wanted or "").strip()
+        if not pid:
+            return "这条声线还没绑定供应商"
+        cfg = None
+        getter = getattr(self.context, "get_config", None)
+        if callable(getter):
+            try:
+                cfg = getter()
+            except Exception as exc:
+                logger.debug(f"[tts_switcher] 读取主配置失败: {exc}")
+                cfg = None
+        rows = cfg.get("provider") if isinstance(cfg, dict) else None
+        if isinstance(rows, list):
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("id") or "").strip().lower() != pid.lower():
+                    continue
+                if item.get("enable") is False:
+                    return (
+                        f"供应商「{pid}」已经在「模型供应商」里被禁用了，"
+                        "先启用它（保存后重启核心）再来切这条声线"
+                    )
+                return (
+                    f"供应商「{pid}」是启用状态但没加载出实例，"
+                    "看一眼核心日志里它的初始化报错"
+                )
+        return f"找不到 id 为 {pid} 的 TTS 供应商，可能已经改名或删掉了"
+
     async def _current_instance(self, umo: str) -> Any:
         """当前会话真正生效的 TTS 实例（优先用官方的 get_using_tts_provider_async）。"""
         ctx = self.context
@@ -1588,10 +1619,7 @@ class TTSSwitcher(Star):
 
         provider = self._resolve_provider(voice["provider_id"])
         if provider is None:
-            return False, (
-                f"没有找到 id 为 {voice['provider_id']} 的 TTS 提供商。"
-                "发 /tts 引擎 看看现在都有哪些，id 改了要重启核心"
-            )
+            return False, self._missing_provider_hint(voice["provider_id"])
 
         provider_id = _provider_id(provider)
         try:
@@ -1620,10 +1648,7 @@ class TTSSwitcher(Star):
         """把全局默认 TTS 换成这个声线：改主配置 + 同步内存态。"""
         provider = self._resolve_provider(voice["provider_id"])
         if provider is None:
-            return False, (
-                f"没有找到 id 为 {voice['provider_id']} 的 TTS 提供商。"
-                "发 /tts 引擎 看看现在都有哪些，id 改了要重启核心"
-            )
+            return False, self._missing_provider_hint(voice["provider_id"])
         provider_id = _provider_id(provider)
 
         cfg = None

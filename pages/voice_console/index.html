@@ -355,6 +355,7 @@
       <div class="toolbar">
         <input type="text" id="search" placeholder="搜索名字 / 别名 / 备注" style="min-width: 220px" />
         <label class="check" style="padding-top: 0"><input type="checkbox" id="onlyEnabled" />只看启用</label>
+        <label class="check" style="padding-top: 0"><input type="checkbox" id="onlyAvailable" />只看可用</label>
         <span class="spacer"></span>
         <button class="ghost small" id="btnAdd">新增声线</button>
       </div>
@@ -406,6 +407,10 @@
         catalog: [],
         pending: [],
         orphans: [],
+        // 主配置里所有 TTS 供应商的启用状态（含已禁用的），用来区分
+        // 「供应商被禁用」和「供应商已经没了」
+        providerEnable: {},
+        supplierStats: {},
         dirty: false,
       };
       const tbody = document.getElementById("rows");
@@ -435,9 +440,20 @@
         dirtyEl.textContent = "";
       }
 
-      function providerExists(pid) {
+      // 供应商状态：ready 可用 / disabled 已禁用 / error 启用但没加载出来 / missing 不存在
+      function supplierState(pid) {
         const id = String(pid || "").toLowerCase();
-        return state.providers.some((p) => String(p.id).toLowerCase() === id);
+        if (!id) return "missing";
+        if (state.providers.some((p) => String(p.id).toLowerCase() === id)) return "ready";
+        const map = state.providerEnable || {};
+        if (Object.prototype.hasOwnProperty.call(map, id)) {
+          return map[id] ? "error" : "disabled";
+        }
+        return "missing";
+      }
+
+      function providerExists(pid) {
+        return supplierState(pid) === "ready";
       }
 
       // 一条声线是否已经代表某个供应商音色
@@ -633,6 +649,7 @@
       function render() {
         const keyword = document.getElementById("search").value.trim().toLowerCase();
         const onlyEnabled = document.getElementById("onlyEnabled").checked;
+        const onlyAvailable = document.getElementById("onlyAvailable").checked;
         tbody.replaceChildren();
 
         let shown = 0;
@@ -640,6 +657,7 @@
           const haystack = `${voice.name} ${voice.alias} ${voice.note} ${voice.provider_id}`.toLowerCase();
           if (keyword && !haystack.includes(keyword)) return;
           if (onlyEnabled && !voice.enabled) return;
+          if (onlyAvailable && supplierState(voice.provider_id) !== "ready") return;
           shown += 1;
 
           const tr = document.createElement("tr");
@@ -675,11 +693,22 @@
             markDirty();
           };
           tdProvider.append(providerInput);
-          if (!providerExists(voice.provider_id)) {
+          const sstate = supplierState(voice.provider_id);
+          if (sstate !== "ready") {
             const tag = document.createElement("span");
-            tag.className = "tag err";
-            tag.textContent = "供应商不存在";
             tag.style.marginLeft = "4px";
+            if (sstate === "disabled") {
+              tag.className = "tag warn";
+              tag.textContent = "供应商已禁用";
+              tag.title = "到「模型供应商」里启用它，保存后重启核心即可";
+            } else if (sstate === "error") {
+              tag.className = "tag warn";
+              tag.textContent = "未加载";
+              tag.title = "供应商是启用状态，但没有加载出实例，看核心日志";
+            } else {
+              tag.className = "tag err";
+              tag.textContent = "供应商不存在";
+            }
             tdProvider.append(tag);
           }
 
@@ -768,7 +797,13 @@
         });
 
         const enabledCount = state.voices.filter((v) => v.enabled).length;
-        statEl.textContent = `共 ${state.voices.length} 条声线，启用 ${enabledCount} 条，供应商 ${(state.providers || []).length} 个`;
+        const disabledN = state.voices.filter((v) => supplierState(v.provider_id) === "disabled").length;
+        const unreadyN = state.voices.filter((v) => supplierState(v.provider_id) !== "ready").length;
+        let summary = `共 ${state.voices.length} 条声线，启用 ${enabledCount} 条，供应商 ${(state.providers || []).length} 个`;
+        if (unreadyN) {
+          summary += `；其中 ${unreadyN} 条的供应商不可用（已禁用 ${disabledN} 条）`;
+        }
+        statEl.textContent = summary;
       }
 
       async function preview(voice, button) {
@@ -820,6 +855,8 @@
         state.catalog = data.catalog || [];
         state.pending = data.pending || [];
         state.orphans = data.orphans || [];
+        state.providerEnable = data.provider_enable || {};
+        state.supplierStats = data.supplier_stats || {};
         fillSettings();
         render();
         renderCatalog();
@@ -832,6 +869,7 @@
           { name: "示例B", provider_id: "示例-通义-plus", voice: "qwen-audio-3.1-tts-plus-demo", alias: "示例b", note: "通义 plus 复刻 · 参考音频 6s", enabled: true },
           { name: "示例本地", provider_id: "示例-本地-GSV", voice: "", alias: "本地,local", note: "本地 GPT-SoVITS · 端口 9880", enabled: true },
           { name: "示例失效", provider_id: "已经删掉的提供商", voice: "", alias: "", note: "用来演示「供应商不存在」的提示", enabled: true },
+          { name: "示例禁用", provider_id: "示例-已禁用", voice: "", alias: "", note: "用来演示「供应商已禁用」的提示", enabled: true },
         ];
         state.settings = {
           enabled: true,
@@ -854,6 +892,12 @@
           { id: "示例-通义-plus", name: "示例-通义-plus" },
           { id: "示例-本地-GSV", name: "示例-本地-GSV" },
         ];
+        state.providerEnable = {
+          "示例-通义-flash": true,
+          "示例-通义-plus": true,
+          "示例-本地-gsv": true,
+          "示例-已禁用": false,
+        };
         state.catalog = [
           {
             id: "示例-通义-flash",
@@ -1016,6 +1060,7 @@
 
       document.getElementById("search").oninput = render;
       document.getElementById("onlyEnabled").onchange = render;
+      document.getElementById("onlyAvailable").onchange = render;
       document.addEventListener("keydown", (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
           event.preventDefault();
