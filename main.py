@@ -355,6 +355,21 @@ class TTSSwitcher(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context, config)
         self.config = config if isinstance(config, dict) else {}
+
+        # 核心 4.29.x 会在启动时给每个 GSV 音色串行 set 一次权重，几十个音色
+        # 就把启动拖成几分钟。补丁把这次 set 挪到合成前，必须在 provider 实例
+        # 化之前装上，所以放在 __init__ 最前面（插件加载早于 provider 加载）。
+        if self.config.get("gsv_lazy_weights", True):
+            try:
+                from .gsv_patch import install as _install_gsv_patch
+
+                self._gsv_patch_on = _install_gsv_patch()
+            except Exception as exc:  # 打不上就算了，核心原行为也能跑
+                self._gsv_patch_on = False
+                logger.warning(f"[tts_switcher] GSV 权重补丁未生效：{exc}")
+        else:
+            self._gsv_patch_on = False
+
         # /说 的冷却记录：key -> 上次成功发声的时间戳
         self._say_last: dict[str, float] = {}
         # /答 的冷却记录

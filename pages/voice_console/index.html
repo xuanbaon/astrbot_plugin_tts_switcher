@@ -434,6 +434,7 @@
         // 「供应商被禁用」和「供应商已经没了」
         providerEnable: {},
         supplierStats: {},
+        gsvLazyWeights: false,
         // 按 api_base 分组的本地语音端口（每个端口上挂了哪些角色）
         ports: [],
         dirty: false,
@@ -670,6 +671,16 @@
             note.append(
               document.createTextNode("端口没在听：这个服务没启动，挂在上面的角色现在都合不出声音。")
             );
+          } else if (state.gsvLazyWeights && port.enabled_count > 1) {
+            note.append(
+              document.createTextNode(
+                `已开启权重按需加载：合成前会切到本角色的权重，这 ${port.enabled_count} 个角色都能用自己的音色，`
+              )
+            );
+            const b2 = document.createElement("b");
+            b2.textContent = "换角色时首次多约 4~5 秒";
+            note.append(b2);
+            note.append(document.createTextNode("，同一角色连续用没有额外开销。"));
           } else if (port.enabled_count > 1) {
             note.append(document.createTextNode("同一端口只能加载一套权重，当前只有 "));
             const b = document.createElement("b");
@@ -747,6 +758,12 @@
               const t = document.createElement("span");
               t.className = "tag";
               t.textContent = "已禁用";
+              stateTd.append(t);
+            } else if (state.gsvLazyWeights) {
+              const t = document.createElement("span");
+              t.className = "tag ok";
+              t.textContent = "按需切换";
+              t.title = "已开启权重按需加载：合成前会切到本角色的权重，不会互相覆盖";
               stateTd.append(t);
             } else if (port.active === role.provider_id) {
               const t = document.createElement("span");
@@ -1043,6 +1060,7 @@
         state.orphans = data.orphans || [];
         state.providerEnable = data.provider_enable || {};
         state.supplierStats = data.supplier_stats || {};
+        state.gsvLazyWeights = data.gsv_lazy_weights === true;
         state.ports = data.ports || [];
         fillSettings();
         render();

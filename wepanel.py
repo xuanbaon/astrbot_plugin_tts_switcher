@@ -471,6 +471,23 @@ def _is_local_endpoint(api_base: str) -> bool:
     return False
 
 
+def _gsv_lazy_on(plugin: Any) -> bool:
+    """GSV 权重是否已经改成「合成时加载」。
+
+    配置开着、补丁也打上了才算生效——插件被禁用或者核心换了实现时要如实说没生效，
+    否则面板会骗人（还标着「按需切换」，其实每个音色都在用最后那套权重）。
+    """
+    conf = getattr(plugin, "config", None)
+    if isinstance(conf, dict) and not _as_bool(conf.get("gsv_lazy_weights", True), True):
+        return False
+    try:
+        from .gsv_patch import is_installed
+
+        return bool(is_installed())
+    except Exception:
+        return False
+
+
 def _port_roles(plugin: Any) -> list[dict]:
     """按 api_base（端口）把 TTS 供应商分组，回答「这个端口上挂了哪些角色」。
 
@@ -755,6 +772,7 @@ def register_web_apis(plugin: Any) -> None:
             "supplier_stats": stats,
             "provider_enable": enabled_map,
             "ports": _port_roles(plugin),
+            "gsv_lazy_weights": _gsv_lazy_on(plugin),
             "settings": _settings_snapshot(plugin),
             "providers": _providers_snapshot(plugin),
             "catalog": catalog,
