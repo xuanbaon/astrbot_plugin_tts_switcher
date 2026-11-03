@@ -753,10 +753,16 @@
               t.className = "tag warn";
               t.textContent = "实际生效";
               stateTd.append(t);
-            } else {
+            } else if (port.active) {
               const t = document.createElement("span");
               t.className = "tag err";
               t.textContent = "会被覆盖";
+              stateTd.append(t);
+            } else {
+              // 端口上没有带权重的角色（例如只配了参考音频），谈不上覆盖
+              const t = document.createElement("span");
+              t.className = "tag ok";
+              t.textContent = "启用";
               stateTd.append(t);
             }
             tr.append(stateTd);
