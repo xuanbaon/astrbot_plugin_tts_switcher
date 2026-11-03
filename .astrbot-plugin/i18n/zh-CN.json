@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "display_name": "TTS 声线切换"
+  },
+  "views": {
+    "voice_console": {
+      "title": "声线控制台"
+    }
+  },
+  "pages": {
+    "voice_console": {
+      "title": "声线控制台"
+    }
+  }
+}

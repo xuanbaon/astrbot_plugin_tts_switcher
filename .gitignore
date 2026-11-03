@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.idea/
+.vscode/
+.DS_Store
+
+# 本地备份文件，不要提交
+*.bak
+*.bak-*
