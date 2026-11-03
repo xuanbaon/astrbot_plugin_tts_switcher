@@ -9,3 +9,15 @@ __pycache__/
 # 本地备份文件，不要提交
 *.bak
 *.bak-*
+
+# 本机运行数据与素材，不要提交
+*.log
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ckpt
+*.pth
+*.onnx
+data/
+temp/
