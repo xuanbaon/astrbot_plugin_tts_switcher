@@ -37,7 +37,7 @@ help: |-
   命中多个不同名字会让你写全，都没命中才提示「没找到声线」
   WebUI 左侧「拓展功能 → 声线控制台」可以自动加载供应商声线，并改名字、别名、备注和指令参数
 version: v1.6.1
-author: 示例 & DeepSeek-V4.1-flash
+author: xuanbaon
 repo: https://github.com/xuanbaon/astrbot_plugin_tts_switcher
 entry: main
 icon: mdi-account-voice
