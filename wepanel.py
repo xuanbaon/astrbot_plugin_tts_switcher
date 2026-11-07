@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -263,6 +265,85 @@ def _is_identity_key(key: str) -> bool:
     return bool(_IDENTITY_KEY_RE.search(key.strip().lower()))
 
 
+# provider 配置条目里代表「音色」的字段名，按优先级找
+VOICE_FIELDS = (
+    "qwen_audio_tts_voice",
+    "dashscope_tts_voice",
+    "openai_tts_voice",
+    "tts_voice",
+    "voice_id",
+    "voice",
+    "speaker",
+    "timbre",
+)
+
+# provider 实例上代表「音色」的属性名（qwen / edge / openai 都是 self.voice）
+VOICE_ATTRS = ("voice", "voice_id", "speaker", "timbre", "singer")
+
+
+def _entry_voice_key(entry: Any) -> tuple[str, str]:
+    """从 provider 配置条目里挑出「音色」字段，返回 (字段名, 当前值)。
+
+    只认「单个字符串」的音色字段；像本地 GSV 的 voices（列表）或权重路径
+    这类东西不在这里改，交由 GSV 自己的配置管。
+    """
+    if not isinstance(entry, dict):
+        return "", ""
+    for key in VOICE_FIELDS:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return key, value.strip()
+    for key, value in entry.items():
+        if not _is_voice_key(key):
+            continue
+        values = _str_values(value)
+        if len(values) == 1:
+            return key, values[0]
+    return "", ""
+
+
+def _instance_voice(provider: Any) -> str:
+    """读运行中实例的当前音色（比配置文件更准，改过实例时以实例为准）。"""
+    for attr in VOICE_ATTRS:
+        try:
+            text = str(getattr(provider, attr, "") or "").strip()
+        except Exception:
+            continue
+        if text:
+            return text
+    return ""
+
+
+def _provider_instance(plugin: Any, provider_id: str) -> Any:
+    wanted = str(provider_id or "").strip().lower()
+    if not wanted:
+        return None
+    try:
+        providers = plugin._providers()
+    except Exception:
+        return None
+    for provider in providers or []:
+        if _provider_id(provider).lower() == wanted:
+            return provider
+    return None
+
+
+def _find_provider_entry(cfg: Any, provider_id: str) -> dict | None:
+    """在主配置的 provider 列表里按 id 找条目（大小写不敏感）。"""
+    wanted = str(provider_id or "").strip().lower()
+    if not wanted or not isinstance(cfg, dict):
+        return None
+    rows = cfg.get("provider")
+    if not isinstance(rows, list):
+        return None
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip().lower() == wanted:
+            return item
+    return None
+
+
 def _catalog_snapshot(plugin: Any) -> list[dict]:
     """当前核心里的所有 TTS 提供商 + 它们各自的音色。"""
     try:
@@ -296,6 +377,9 @@ def _catalog_snapshot(plugin: Any) -> list[dict]:
                         }
                     )
         ptype = str(cfg.get("type") or "").strip()
+        voice_key, voice_value = _entry_voice_key(cfg)
+        # 实例上的属性才是「此刻真正会用的音色」——qwen/edge/openai 都是 self.voice
+        current = _instance_voice(provider) or voice_value
         rows.append(
             {
                 "id": pid,
@@ -306,6 +390,9 @@ def _catalog_snapshot(plugin: Any) -> list[dict]:
                 or any(k in pid.lower() for k in ("gsv", "sovits", "local")),
                 "voices": voices,
                 "identity": identity,
+                "voice_key": voice_key,
+                "voice": voice_value,
+                "current_voice": current,
             }
         )
     rows.sort(key=lambda r: (not r["local"], r["id"].lower()))
@@ -635,6 +722,133 @@ def _plan_sync(plugin: Any) -> tuple[list[dict], list[dict], list[dict]]:
     return pending, orphans, catalog
 
 
+def _scan_report(plugin: Any) -> dict:
+    """扫一遍所有 TTS 供应商：哪些在线、现在是什么音色、哪些声线还没接上。
+
+    报告除了给前端画表格，还带两样能直接判断的东西：
+    - drift：声线里写的音色和供应商当前音色不一致的（改了但没同步）
+    - added / removed：和上一次扫描相比，供应商多了谁、少了谁
+    """
+    catalog = _catalog_snapshot(plugin)
+    enable_map = _provider_enable_map(plugin)
+    voices = _voice_rows(plugin)
+    pending, orphans, _catalog = _plan_sync(plugin)
+    ports = _port_roles(plugin)
+
+    bound: dict[str, list[str]] = {}
+    bound_rows: dict[str, list[dict]] = {}
+    for item in voices:
+        pid = str(item.get("provider_id") or "").strip().lower()
+        if not pid:
+            continue
+        bound.setdefault(pid, []).append(str(item.get("name") or ""))
+        bound_rows.setdefault(pid, []).append(item)
+
+    providers: list[dict] = []
+    for row in catalog:
+        pid = str(row["id"])
+        key = str(row.get("voice_key") or "")
+        current = str(row.get("current_voice") or "")
+        drift = [
+            {"name": str(v.get("name") or ""), "voice": str(v.get("voice") or "")}
+            for v in bound_rows.get(pid.lower(), [])
+            if str(v.get("voice") or "").strip()
+            and str(v.get("voice") or "").strip() != current
+        ]
+        providers.append(
+            {
+                "id": pid,
+                "name": row.get("name") or pid,
+                "type": row.get("type") or "",
+                "model": row.get("model") or "",
+                "local": bool(row.get("local")),
+                "voice_key": key,
+                "voice": str(row.get("voice") or ""),
+                "current_voice": current,
+                "can_push": bool(key),
+                "bound": bound.get(pid.lower(), []),
+                "drift": drift,
+                "state": "ready",
+            }
+        )
+
+    # 主配置里有、但没加载出实例的：被禁用 or 初始化失败，也要让人看见
+    loaded_ids = {str(row["id"]).lower() for row in catalog}
+    for pid, enabled in enable_map.items():
+        if pid in loaded_ids:
+            continue
+        entry = next(
+            (
+                e
+                for e in _tts_provider_rows(plugin)
+                if str(e.get("id") or "").strip().lower() == pid
+            ),
+            None,
+        )
+        entry = entry or {}
+        key, value = _entry_voice_key(entry)
+        real_id = str(entry.get("id") or pid)
+        providers.append(
+            {
+                "id": real_id,
+                "name": real_id,
+                "type": str(entry.get("type") or ""),
+                "model": str(entry.get("model") or ""),
+                "local": "gsv" in str(entry.get("type") or "").lower(),
+                "voice_key": key,
+                "voice": value,
+                "current_voice": "",
+                "can_push": bool(key),
+                "bound": bound.get(pid, []),
+                "drift": [],
+                "state": "disabled" if not enabled else "error",
+            }
+        )
+
+    providers.sort(key=lambda p: (p["state"] != "ready", str(p["id"]).lower()))
+
+    ids = sorted({str(p["id"]).lower() for p in providers})
+    cache = getattr(plugin, "_tts_scan_cache", None) or {}
+    prev = set(cache.get("ids") or [])
+    previous = set(cache.get("by_id") or {})
+    added = [p["id"] for p in providers if str(p["id"]).lower() not in prev]
+    removed = sorted(previous - set(ids))
+    try:
+        plugin._tts_scan_cache = {
+            "at": time.time(),
+            "ids": ids,
+            "by_id": {str(p["id"]).lower(): str(p["id"]) for p in providers},
+        }
+    except Exception:  # pragma: no cover - 只影响差异提示
+        pass
+
+    return {
+        "ok": True,
+        "at": int(time.time()),
+        "first_scan": not cache,
+        "added": added,
+        "removed": removed,
+        "providers": providers,
+        "pending": pending,
+        "orphans": orphans,
+        "ports": ports,
+        "summary": {
+            "providers": len(providers),
+            "ready": sum(1 for p in providers if p["state"] == "ready"),
+            "disabled": sum(1 for p in providers if p["state"] == "disabled"),
+            "error": sum(1 for p in providers if p["state"] == "error"),
+            "in_config": len(enable_map),
+            "voices": len(voices),
+            "bound_providers": len(bound),
+            "pending": len(pending),
+            "orphans": len(orphans),
+            "drift": sum(len(p.get("drift") or []) for p in providers),
+            "ports": len(ports),
+            "ports_online": sum(1 for p in ports if p.get("online")),
+        },
+    }
+
+
 def _merge_voices(base_rows: list[dict], pending: list[dict]) -> tuple[list[dict], int]:
     """把待加载的供应商声线追加进去，返回 (新列表, 追加条数)。"""
     rows = [dict(item) for item in base_rows]
@@ -888,6 +1102,267 @@ def register_web_apis(plugin: Any) -> None:
         state["remapped"] = remapped
         return jsonify(state)
 
+    async def api_scan():
+        """扫描一遍所有语音供应商：谁在线、什么音色、哪些声线还没接上。"""
+        try:
+            report = _scan_report(plugin)
+        except Exception as exc:
+            logger.error("[tts_switcher] 扫描供应商失败: %s", exc)
+            return jsonify({"ok": False, "error": f"扫描失败：{exc}"}), 500
+        state = _state()
+        state.update(report)
+        state["mode"] = "scan"
+        return jsonify(state)
+
+    async def api_push():
+        """把声线上的音色写回供应商配置，并热更新运行中的实例。
+
+        不传 items 时=把所有「声线音色 ≠ 供应商当前音色」的自动同步一遍。
+        """
+        payload = await _read_json()
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            items = []
+            if payload.get("provider_id"):
+                items = [
+                    {
+                        "provider_id": payload.get("provider_id"),
+                        "voice": payload.get("voice"),
+                        "name": payload.get("name"),
+                    }
+                ]
+        if not items:
+            try:
+                report = _scan_report(plugin)
+            except Exception as exc:
+                return jsonify({"ok": False, "error": f"扫描失败：{exc}"}), 500
+            for row in report["providers"]:
+                for drift in row.get("drift") or []:
+                    items.append(
+                        {
+                            "provider_id": row["id"],
+                            "voice": drift.get("voice"),
+                            "name": drift.get("name"),
+                        }
+                    )
+        if not items:
+            return jsonify({"ok": False, "error": "没有需要同步的音色"}), 400
+
+        getter = getattr(plugin.context, "get_config", None)
+        cfg = None
+        if callable(getter):
+            try:
+                cfg = getter()
+            except Exception as exc:  # pragma: no cover - 核心接口异常只降级
+                logger.warning("[tts_switcher] 读取主配置失败: %s", exc)
+        if not isinstance(cfg, dict):
+            return jsonify({"ok": False, "error": "读不到主配置"}), 500
+
+        # 改主配置前先留一份，出问题能直接覆盖回去
+        backup = ""
+        src = str(getattr(cfg, "config_path", "") or "")
+        if src and Path(src).exists():
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            dst = Path(src).with_name(Path(src).name + f".bak-ttsvoice-{stamp}")
+            try:
+                shutil.copy2(src, dst)
+                backup = str(dst)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("[tts_switcher] 备份主配置失败: %s", exc)
+
+        results: list[dict] = []
+        changed = False
+        # 同一个提供商同一时刻只能有一个音色，两条声线写不同值时后写的赢
+        merged: dict[str, dict] = {}
+        dropped = 0
+        shared_count: dict[str, int] = {}
+        for v in _voice_rows(plugin):
+            owner = str(v.get("provider_id") or "").strip().lower()
+            if owner:
+                shared_count[owner] = shared_count.get(owner, 0) + 1
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("provider_id") or "").strip().lower()
+            if not pid:
+                merged[f"__blank_{len(merged)}"] = item
+                continue
+            if pid in merged:
+                dropped += 1
+            merged[pid] = item
+        for item in merged.values():
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("provider_id") or "").strip()
+            voice = str(item.get("voice") or "").strip()
+            label = str(item.get("name") or pid)
+            if not pid or not voice:
+                results.append(
+                    {
+                        "name": label,
+                        "provider_id": pid,
+                        "ok": False,
+                        "error": "缺少提供商或音色",
+                    }
+                )
+                continue
+            entry = _find_provider_entry(cfg, pid)
+            if entry is None:
+                results.append(
+                    {
+                        "name": label,
+                        "provider_id": pid,
+                        "ok": False,
+                        "error": "主配置里没有这个提供商",
+                    }
+                )
+                continue
+            key, before = _entry_voice_key(entry)
+            if not key:
+                results.append(
+                    {
+                        "name": label,
+                        "provider_id": pid,
+                        "ok": False,
+                        "error": "这个提供商没有可写的音色字段（本地权重类请到它自己的配置里改）",
+                    }
+                )
+                continue
+            provider = _provider_instance(plugin, pid)
+            applied = False
+            if provider is not None:
+                for attr in VOICE_ATTRS:
+                    if not hasattr(provider, attr):
+                        continue
+                    try:
+                        setattr(provider, attr, voice)
+                        applied = True
+                        break
+                    except Exception:  # pragma: no cover
+                        continue
+            entry[key] = voice
+            changed = True
+            results.append(
+                {
+                    "name": label,
+                    "provider_id": pid,
+                    "key": key,
+                    "before": before,
+                    "after": voice,
+                    "ok": True,
+                    "applied": applied,
+                    "shared": shared_count.get(pid.lower(), 0),
+                }
+            )
+
+        if not changed:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "没有一条写成功，看每条的说明",
+                        "pushed": results,
+                    }
+                ),
+                400,
+            )
+
+        try:
+            saver = getattr(cfg, "save_config_async", None)
+            if callable(saver):
+                await saver()
+            else:  # pragma: no cover - 老版本核心只有同步版本
+                cfg.save_config()
+        except Exception as exc:
+            logger.error("[tts_switcher] 写主配置失败: %s", exc)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": f"写主配置失败：{exc}",
+                        "pushed": results,
+                        "backup": backup,
+                    }
+                ),
+                500,
+            )
+
+        logger.info(
+            "[tts_switcher] 已把 %d 条声线的音色同步到供应商（备份：%s）",
+            len([r for r in results if r.get("ok")]),
+            backup or "无",
+        )
+        state = _state()
+        state["mode"] = "push"
+        state["pushed"] = results
+        state["backup"] = backup
+        state["merged_off"] = dropped
+        try:  # 顺手带一份新的扫描摘要，前端卡片能立刻显示「待同步 0 条」
+            state.update(_scan_report(plugin))
+        except Exception:  # pragma: no cover
+            pass
+        return jsonify(state)
+
+    async def api_pull():
+        """反向同步：把供应商当前音色写回声线里的 voice 字段。"""
+        payload = await _read_json()
+        only = str(payload.get("provider_id") or "").strip().lower()
+        path = _config_path(plugin)
+        if path is None:
+            return jsonify({"ok": False, "error": "找不到插件配置文件"}), 400
+        data = _read_file(path)
+        if not data:
+            return jsonify({"ok": False, "error": "配置文件读不出来"}), 400
+        rows = data.get("voices")
+        if not isinstance(rows, list):
+            rows = list(plugin.config.get("voices") or [])
+        rows = [v for v in rows if isinstance(v, dict)]
+
+        current: dict[str, str] = {}
+        for row in _catalog_snapshot(plugin):
+            value = str(row.get("current_voice") or "").strip()
+            if value:
+                current[str(row.get("id") or "").lower()] = value
+
+        pulled: list[dict] = []
+        for item in rows:
+            pid = str(item.get("provider_id") or "").strip().lower()
+            if only and pid != only:
+                continue
+            value = current.get(pid)
+            if not value:
+                continue
+            before = str(item.get("voice") or "").strip()
+            if before == value:
+                continue
+            item["voice"] = value
+            pulled.append(
+                {
+                    "name": str(item.get("name") or ""),
+                    "provider_id": str(item.get("provider_id") or ""),
+                    "before": before,
+                    "after": value,
+                }
+            )
+
+        if pulled:
+            data["voices"] = rows
+            try:
+                _persist(plugin, data, path)
+            except Exception as exc:
+                logger.error("[tts_switcher] 拉取音色写配置失败: %s", exc)
+                return jsonify({"ok": False, "error": f"写配置失败：{exc}"}), 500
+            logger.info("[tts_switcher] 已从供应商回填 %d 条声线的音色", len(pulled))
+
+        state = _state()
+        state["mode"] = "pull"
+        state["pulled"] = pulled
+        try:
+            state.update(_scan_report(plugin))
+        except Exception:  # pragma: no cover
+            pass
+        return jsonify(state)
+
     async def api_preview():
         """试听：用指定声线合成一句话，返回 wav 的 base64 data URI。"""
         payload = await _read_json()
@@ -934,6 +1409,9 @@ def register_web_apis(plugin: Any) -> None:
         ("panel/save", api_save, ["POST"], "面板：保存声线与设置"),
         ("panel/reload", api_reload, ["POST"], "面板：从磁盘重载配置"),
         ("panel/sync", api_sync, ["POST"], "面板：从模型供应商同步声线"),
+        ("panel/scan", api_scan, ["POST"], "面板：扫描供应商与当前音色"),
+        ("panel/push", api_push, ["POST"], "面板：把声线音色写回供应商"),
+        ("panel/pull", api_pull, ["POST"], "面板：从供应商回填声线音色"),
         ("panel/preview", api_preview, ["POST"], "面板：试听一条声线"),
     )
     for route, handler, methods, desc in routes:

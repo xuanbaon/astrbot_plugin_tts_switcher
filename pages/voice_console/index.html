@@ -219,9 +219,33 @@
       <span class="stat" id="stat">加载中…</span>
       <span class="spacer"></span>
       <span class="muted" id="dirtyFlag"></span>
+      <button class="ghost" id="btnScan">扫描</button>
       <button class="ghost" id="btnReload">重新读取</button>
       <button class="primary" id="btnSave">保存并生效</button>
     </header>
+
+    <details class="card" id="scanCard" hidden>
+      <summary>扫描结果<span class="tag" id="scanTag">—</span></summary>
+      <div class="toolbar">
+        <span class="muted" id="scanSummary">还没有扫描。</span>
+        <span class="spacer"></span>
+        <button class="ghost small" id="btnScanAgain">重新扫描</button>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 210px">供应商</th>
+              <th style="width: 110px">状态</th>
+              <th style="width: 240px">当前音色</th>
+              <th style="width: 90px">绑定声线</th>
+              <th>待同步</th>
+            </tr>
+          </thead>
+          <tbody id="scanRows"></tbody>
+        </table>
+      </div>
+    </details>
 
     <div class="banner tip" id="refreshTip" hidden>
       <span>
@@ -380,6 +404,8 @@
         <label class="check" style="padding-top: 0"><input type="checkbox" id="onlyEnabled" />只看启用</label>
         <label class="check" style="padding-top: 0"><input type="checkbox" id="onlyAvailable" />只看可用</label>
         <span class="spacer"></span>
+        <button class="ghost small" id="btnPull" title="把供应商当前音色写回声线的「音色」列">从供应商回填音色</button>
+        <button class="ghost small" id="btnPush" title="把声线里写的音色写回供应商配置（会改模型供应商）">同步音色到供应商</button>
         <button class="ghost small" id="btnAdd">新增声线</button>
       </div>
       <div class="scroll">
@@ -389,6 +415,7 @@
               <th style="width: 46px">启用</th>
               <th style="width: 160px">名字（指令里打这个）</th>
               <th style="width: 180px">提供商 ID</th>
+              <th style="width: 190px">音色（空=用供应商当前音色）</th>
               <th style="width: 170px">别名（半角 , 或 全角 ，）</th>
               <th>备注</th>
               <th style="width: 160px">操作</th>
@@ -480,6 +507,35 @@
 
       function providerExists(pid) {
         return supplierState(pid) === "ready";
+      }
+
+      // 供应商目录里的一行（含它配置里写的音色、实例上正生效的音色）
+      function catalogRow(pid) {
+        const key = String(pid || "").toLowerCase();
+        if (!key) return null;
+        return (state.catalog || []).find((r) => String(r.id).toLowerCase() === key) || null;
+      }
+
+      // 供应商「此刻」真正会用的音色：实例属性优先，其次配置里写的
+      function currentVoiceOf(pid) {
+        const row = catalogRow(pid);
+        if (!row) return "";
+        return String(row.current_voice || row.voice || "");
+      }
+
+      // 某个供应商可选的音色（给输入框做候选）
+      function voiceOptions(pid) {
+        const row = catalogRow(pid);
+        if (!row) return [];
+        const out = [];
+        const push = (value, label) => {
+          const text = String(value || "").trim();
+          if (!text || out.some((o) => o.value === text)) return;
+          out.push({ value: text, label: label || text });
+        };
+        (row.voices || []).forEach((v) => push(v.value, v.label));
+        push(row.voice, row.voice);
+        return out;
       }
 
       // 一条声线是否已经代表某个供应商音色
@@ -994,6 +1050,37 @@
             tdProvider.append(tag);
           }
 
+          // 音色：留空=用供应商当前的；填了=希望这个供应商换成这个音色（点「同步音色到供应商」才写回去）
+          const tdVoice = document.createElement("td");
+          const voiceInput = document.createElement("input");
+          voiceInput.type = "text";
+          voiceInput.value = voice.voice || "";
+          const owning = currentVoiceOf(voice.provider_id);
+          voiceInput.placeholder = owning || "空=用供应商当前音色";
+          const listId = `voiceOpts-${state.voices.indexOf(voice)}`;
+          voiceInput.setAttribute("list", listId);
+          const optionList = document.createElement("datalist");
+          optionList.id = listId;
+          voiceOptions(voice.provider_id).forEach((opt) => {
+            const node = document.createElement("option");
+            node.value = opt.value;
+            node.label = opt.label;
+            optionList.append(node);
+          });
+          voiceInput.oninput = () => {
+            voice.voice = voiceInput.value.trim();
+            markDirty();
+          };
+          tdVoice.append(voiceInput, optionList);
+          if (voice.voice && owning && voice.voice !== owning) {
+            const tag = document.createElement("span");
+            tag.className = "tag warn";
+            tag.textContent = "待同步";
+            tag.style.marginLeft = "4px";
+            tag.title = `供应商现在是 ${owning}，点「同步音色到供应商」才会换成 ${voice.voice}`;
+            tdVoice.append(tag);
+          }
+
           const tdAlias = document.createElement("td");
           const aliasInput = document.createElement("input");
           aliasInput.type = "text";
@@ -1050,14 +1137,14 @@
           };
           tdOps.append(sayBtn, previewBtn, delBtn);
 
-          tr.append(tdOn, tdName, tdProvider, tdAlias, tdNote, tdOps);
+          tr.append(tdOn, tdName, tdProvider, tdVoice, tdAlias, tdNote, tdOps);
           tbody.append(tr);
         });
 
         if (!shown) {
           const tr = document.createElement("tr");
           const td = document.createElement("td");
-          td.colSpan = 6;
+          td.colSpan = 7;
           td.className = "muted";
           td.style.padding = "18px";
           td.textContent = state.voices.length
@@ -1088,6 +1175,203 @@
           summary += `；其中 ${unreadyN} 条的供应商不可用（已禁用 ${disabledN} 条）`;
         }
         statEl.textContent = summary;
+      }
+
+      // ── 扫描结果：谁在线、什么音色、哪条声线还没对上 ──
+      function renderScan(data) {
+        if (!data || !data.summary) return;
+        const card = document.getElementById("scanCard");
+        const body = document.getElementById("scanRows");
+        const tag = document.getElementById("scanTag");
+        const summaryEl = document.getElementById("scanSummary");
+        const s = data.summary;
+        card.hidden = false;
+
+        const parts = [];
+        parts.push(`供应商 ${s.providers || 0} 个（可用 ${s.ready || 0}`);
+        if (s.disabled) parts.push(`禁用 ${s.disabled}`);
+        if (s.error) parts.push(`没加载 ${s.error}`);
+        parts.push("）");
+        parts.push(`声线 ${s.voices || 0} 条，绑定了 ${s.bound_providers || 0} 个供应商`);
+        if (s.pending) parts.push(`未加入 ${s.pending} 条`);
+        if (s.orphans) parts.push(`失效 ${s.orphans} 条`);
+        if (s.drift) parts.push(`待同步 ${s.drift} 条`);
+        if (s.ports) parts.push(`本地端口 ${s.ports_online || 0}/${s.ports} 在线`);
+        const when = data.at ? new Date(data.at * 1000).toLocaleTimeString() : "";
+        summaryEl.textContent = `${when} 扫描：${parts.join("，")}。`;
+
+        const moved = [];
+        if ((data.added || []).length) moved.push(`新增 ${data.added.join("、")}`);
+        if ((data.removed || []).length) moved.push(`消失 ${data.removed.join("、")}`);
+        tag.textContent = data.first_scan ? "首次扫描" : moved.length ? moved.join(" / ") : "无变化";
+        tag.className = "tag" + (moved.length ? " warn" : " ok");
+
+        body.replaceChildren();
+        (data.providers || []).forEach((row) => {
+          const tr = document.createElement("tr");
+
+          const tdName = document.createElement("td");
+          tdName.textContent = row.name || row.id;
+          if (row.id && row.id !== row.name) {
+            const hint = document.createElement("div");
+            hint.className = "cmd-hint";
+            hint.textContent = row.id;
+            tdName.append(hint);
+          }
+
+          const tdState = document.createElement("td");
+          const badge = document.createElement("span");
+          const st = row.state || "ready";
+          badge.className = "tag " + (st === "ready" ? "ok" : "warn");
+          badge.textContent = st === "ready" ? "可用" : st === "disabled" ? "已禁用" : "没加载";
+          tdState.append(badge);
+
+          const tdVoice = document.createElement("td");
+          tdVoice.className = "cmd-hint";
+          tdVoice.textContent = row.current_voice || row.voice || "（供应商内固定音色）";
+          if (row.current_voice && row.voice && row.current_voice !== row.voice) {
+            const note = document.createElement("div");
+            note.className = "muted";
+            note.textContent = `配置里写的是 ${row.voice}`;
+            tdVoice.append(note);
+          }
+
+          const tdBound = document.createElement("td");
+          tdBound.textContent = (row.bound || []).length ? `${row.bound.length} 条` : "—";
+          if ((row.bound || []).length) tdBound.title = row.bound.join("、");
+
+          const tdDrift = document.createElement("td");
+          const drift = row.drift || [];
+          if (!drift.length) {
+            tdDrift.className = "muted";
+            tdDrift.textContent = "—";
+          } else {
+            const text = document.createElement("span");
+            text.textContent = `${drift.length} 条：${drift.map((d) => d.name).join("、")}`;
+            const btn = document.createElement("button");
+            btn.className = "ghost small";
+            btn.style.marginLeft = "6px";
+            btn.textContent = "同步";
+            btn.title = `把这个供应商的音色改成 ${drift[0].voice}`;
+            btn.onclick = () =>
+              pushVoices([
+                { provider_id: row.id, voice: drift[0].voice, name: drift[0].name },
+              ]);
+            tdDrift.append(text, btn);
+          }
+
+          tr.append(tdName, tdState, tdVoice, tdBound, tdDrift);
+          body.append(tr);
+        });
+      }
+
+      // 把声线里写的音色写回供应商（改的是「模型供应商」，会备份配置）
+      async function pushVoices(items) {
+        if (isDemo) {
+          toast("预览模式不能同步");
+          return;
+        }
+        if (state.dirty) {
+          toast("先点「保存并生效」，把声线改动写进配置，再同步", true);
+          return;
+        }
+        if (!items || !items.length) {
+          const drift = (state.voices || []).filter((v) => {
+            const cur = currentVoiceOf(v.provider_id);
+            return v.voice && cur && v.voice !== cur;
+          });
+          if (!drift.length) {
+            toast("没有待同步的音色：声线里写的和供应商当前的一致");
+            return;
+          }
+        }
+        try {
+          const payload = items && items.length ? { items } : {};
+          const data = await bridge.apiPost("panel/push", payload);
+          if (!data || !data.ok) throw new Error((data && data.error) || "同步失败");
+          applyState(data);
+          renderScan(data);
+          const pushed = data.pushed || [];
+          const okCount = pushed.filter((r) => r.ok).length;
+          const failed = pushed.filter((r) => !r.ok);
+          if (okCount) {
+            const backup = String(data.backup || "").split(/[\\/]/).pop();
+            const shared = pushed.filter((r) => r.ok && (r.shared || 0) > 1);
+            let msg = `已改掉 ${okCount} 个供应商的音色${backup ? `（备份 ${backup}）` : ""}，立刻生效`;
+            if (shared.length) {
+              msg += `；${shared[0].provider_id} 被 ${shared[0].shared} 条声线共用，会一起变`;
+            }
+            if (data.merged_off) msg += "；同一供应商的多个取值只用了最后一个";
+            toast(msg);
+          }
+          if (failed.length) {
+            toast(failed[0].error || "有没写成功的，看扫描结果", true);
+          }
+        } catch (error) {
+          toast(String(error.message || error), true);
+        }
+      }
+
+      // 反向：把供应商当前音色回填到声线的「音色」列
+      async function pullVoices() {
+        if (isDemo) {
+          toast("预览模式不能同步");
+          return;
+        }
+        if (state.dirty && !confirm("有未保存的改动，回填会覆盖音色列，继续？")) return;
+        try {
+          const data = await bridge.apiPost("panel/pull", {});
+          if (!data || !data.ok) throw new Error((data && data.error) || "回填失败");
+          applyState(data);
+          renderScan(data);
+          clearDirty();
+          const pulled = data.pulled || [];
+          toast(
+            pulled.length
+              ? `已回填 ${pulled.length} 条声线的音色`
+              : "声线里的音色和供应商一致，不用回填"
+          );
+        } catch (error) {
+          toast(String(error.message || error), true);
+        }
+      }
+
+      async function scanSuppliers() {
+        if (isDemo) {
+          toast("预览模式：下面是示例数据");
+          return;
+        }
+        if (state.dirty && !confirm("有未保存的改动，扫描会按磁盘上的配置重画，继续？")) return;
+        const buttons = [document.getElementById("btnScan"), document.getElementById("btnScanAgain")];
+        buttons.forEach((btn) => {
+          if (!btn) return;
+          btn.disabled = true;
+          btn.textContent = "扫描中…";
+        });
+        try {
+          const data = await bridge.apiPost("panel/scan", {});
+          if (!data || !data.ok) throw new Error((data && data.error) || "扫描失败");
+          applyState(data);
+          renderScan(data);
+          clearDirty();
+          const s = data.summary || {};
+          toast(
+            `扫描完成：${s.providers || 0} 个供应商、${s.voices || 0} 条声线，待加入 ${s.pending || 0} 条、待同步 ${s.drift || 0} 条`
+          );
+        } catch (error) {
+          toast(String(error.message || error), true);
+        } finally {
+          const scanBtn = document.getElementById("btnScan");
+          if (scanBtn) {
+            scanBtn.disabled = false;
+            scanBtn.textContent = "扫描";
+          }
+          const again = document.getElementById("btnScanAgain");
+          if (again) {
+            again.disabled = false;
+            again.textContent = "重新扫描";
+          }
+        }
       }
 
       async function preview(voice, button) {
@@ -1194,6 +1478,11 @@
             local: false,
             voices: [{ key: "qwen_audio_tts_voice", value: "qwen-audio-3.1-tts-flash-demo", label: "…tts-flash-demo" }],
             identity: [],
+            voice_key: "qwen_audio_tts_voice",
+            current_voice: "qwen-audio-3.1-tts-flash-demo",
+            state: "ready",
+            bound: ["示例A"],
+            drift: 0,
           },
           {
             id: "示例-本地-GSV",
@@ -1203,6 +1492,11 @@
             local: true,
             voices: [],
             identity: [{ key: "gpt_weights_path", value: "E:/example/voice/example-e10.ckpt", label: "example-e10.ckpt" }],
+            voice_key: "",
+            current_voice: "",
+            state: "ready",
+            bound: ["示例本地"],
+            drift: 0,
           },
           {
             id: "新加但没加载进来的提供商",
@@ -1212,6 +1506,11 @@
             local: false,
             voices: [{ key: "openai_tts_voice", value: "alloy", label: "alloy" }],
             identity: [],
+            voice_key: "openai_tts_voice",
+            current_voice: "alloy",
+            state: "error",
+            bound: [],
+            drift: 1,
           },
         ];
         state.pending = [
@@ -1225,8 +1524,8 @@
         state.orphans = [{ name: "示例失效", provider_id: "已经删掉的提供商", voice: "" }];
         state.ports = [
           {
-            api_base: "http://127.0.0.1:9882",
-            port: 9882,
+            api_base: "http://127.0.0.1:9880",
+            port: 9880,
             online: false,
             total: 3,
             enabled_count: 2,
@@ -1262,11 +1561,28 @@
             ],
           },
         ];
+        state.scanned_at = Date.now() / 1000;
+        state.added = ["新加但没加载进来的提供商"];
+        state.removed = [];
+        state.summary = {
+          providers: 4,
+          providers_available: 3,
+          voices: state.voices.length,
+          bound_providers: 2,
+          drift: 1,
+          pending: 0,
+          orphans: state.orphans.length,
+          ports_online: 0,
+          ports_total: 1,
+          added: 1,
+          removed: 0,
+        };
         fillSettings();
         render();
         renderCatalog();
         renderOrphans();
         renderPorts();
+        renderScan(state);
         toast("预览模式：没有连上 AstrBot，下面是示例数据");
       }
 
@@ -1315,6 +1631,10 @@
       }
 
       document.getElementById("btnSave").onclick = save;
+      document.getElementById("btnScan").onclick = scanSuppliers;
+      document.getElementById("btnScanAgain").onclick = scanSuppliers;
+      document.getElementById("btnPush").onclick = () => pushVoices([]);
+      document.getElementById("btnPull").onclick = pullVoices;
       document.getElementById("btnReload").onclick = async () => {
         if (isDemo) {
           toast("预览模式没有可读取的配置");
