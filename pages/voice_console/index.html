@@ -1561,21 +1561,23 @@
             ],
           },
         ];
-        state.scanned_at = Date.now() / 1000;
+        state.at = Date.now() / 1000;
+        state.first_scan = false;
         state.added = ["新加但没加载进来的提供商"];
         state.removed = [];
         state.summary = {
           providers: 4,
-          providers_available: 3,
+          ready: 2,
+          disabled: 1,
+          error: 1,
+          in_config: 4,
           voices: state.voices.length,
           bound_providers: 2,
-          drift: 1,
-          pending: 0,
+          pending: 1,
           orphans: state.orphans.length,
+          drift: 1,
+          ports: 1,
           ports_online: 0,
-          ports_total: 1,
-          added: 1,
-          removed: 0,
         };
         fillSettings();
         render();
