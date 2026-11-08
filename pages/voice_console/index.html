@@ -247,6 +247,50 @@
       </div>
     </details>
 
+    <details class="card" id="scopeCard" open>
+      <summary>会话声线（等同 /tts、/tts=全局）<span class="tag" id="scopeTag">—</span></summary>
+      <div class="toolbar">
+        <span class="muted">默认声线</span>
+        <b id="globalVoice" style="font-size: 13px">—</b>
+        <input id="scopeVoice" list="scopeVoiceList" placeholder="声线名 / 提供商 ID" style="width: 210px" />
+        <datalist id="scopeVoiceList"></datalist>
+        <button class="primary small" id="btnSetGlobal">设为默认</button>
+        <button class="ghost small" id="btnSetAll">全部对话都用它</button>
+        <span class="spacer"></span>
+        <button class="ghost small" id="btnRefreshScope">刷新会话</button>
+      </div>
+      <div class="toolbar">
+        <span class="muted">
+          「设为默认」= 改面板「AI → 语音回复 → 默认文本转语音模型」，所有没单独设置的会话都跟着变；
+          「全部对话都用它」= 改默认 + 清空下面所有单独设置。
+        </span>
+        <span class="spacer"></span>
+        <button class="ghost small" id="btnClearAll">清空所有会话覆盖</button>
+      </div>
+      <div class="toolbar">
+        <input id="scopeSearch" placeholder="搜会话名 / 平台 / ID" style="width: 240px" />
+        <label class="check" style="padding-top: 0"><input type="checkbox" id="scopeOnlyOverride" />只看单独设置过的</label>
+        <span class="spacer"></span>
+        <span class="muted" id="scopeSummary">—</span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 230px">会话</th>
+              <th style="width: 66px">类型</th>
+              <th style="width: 110px">平台</th>
+              <th style="width: 180px">当前声线</th>
+              <th style="width: 70px">来源</th>
+              <th style="width: 118px">最后活动</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="scopeRows"></tbody>
+        </table>
+      </div>
+    </details>
+
     <div class="banner tip" id="refreshTip" hidden>
       <span>
         加完声线后列表没变？多半是浏览器还在用缓存的旧页面，按
@@ -464,6 +508,8 @@
         gsvLazyWeights: false,
         // 按 api_base 分组的本地语音端口（每个端口上挂了哪些角色）
         ports: [],
+        // 默认声线 + 各会话当前声线（面板直接执行 /tts、/tts=全局）
+        scope: null,
         dirty: false,
       };
       const tbody = document.getElementById("rows");
@@ -1336,6 +1382,199 @@
         }
       }
 
+      // ------------------------------------------------------------ 会话声线
+      function scopeVoices() {
+        return (state.voices || []).filter((v) => v.enabled !== false && v.provider_id);
+      }
+
+      function fillScopeVoiceList() {
+        const list = document.getElementById("scopeVoiceList");
+        if (!list) return;
+        list.replaceChildren();
+        scopeVoices().forEach((v) => {
+          if (!v.name) return;
+          const opt = document.createElement("option");
+          opt.value = v.name;
+          list.append(opt);
+        });
+      }
+
+      function renderScope(data) {
+        if (data && data.global) state.scope = data;
+        const info = state.scope;
+        if (!info) return;
+        fillScopeVoiceList();
+        const g = info.global || {};
+        const gEl = document.getElementById("globalVoice");
+        if (gEl) gEl.textContent = g.name ? `${g.name}（${g.provider_id}）` : "（还没设置）";
+        const st = info.stats || {};
+        const tag = document.getElementById("scopeTag");
+        if (tag) tag.textContent = `${st.total || 0} 个会话`;
+        const sum = document.getElementById("scopeSummary");
+        if (sum) {
+          sum.textContent =
+            `共 ${st.total || 0} 个，单独设置 ${st.overridden || 0} 个，跟随默认 ${st.following || 0} 个`;
+        }
+        renderScopeRows();
+      }
+
+      function renderScopeRows() {
+        const tbody = document.getElementById("scopeRows");
+        if (!tbody) return;
+        const info = state.scope || {};
+        const globalVoice = (info.global || {}).name || "";
+        const kwEl = document.getElementById("scopeSearch");
+        const keyword = ((kwEl && kwEl.value) || "").trim().toLowerCase();
+        const onlyOverride = !!document.getElementById("scopeOnlyOverride").checked;
+        const rows = (info.sessions || []).filter((row) => {
+          if (onlyOverride && row.source !== "session") return false;
+          if (!keyword) return true;
+          return [
+            row.display, row.name, row.umo, row.platform,
+            row.kind_label, row.voice, row.voice_name,
+          ].join(" ").toLowerCase().includes(keyword);
+        });
+
+        tbody.replaceChildren();
+        if (!rows.length) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.className = "muted";
+          td.textContent = (info.sessions || []).length
+            ? "没有匹配的会话"
+            : "还没有任何会话记录（要先有聊过天的会话，这里才会出现）";
+          tr.append(td);
+          tbody.append(tr);
+          return;
+        }
+
+        rows.forEach((row) => {
+          const tr = document.createElement("tr");
+
+          const tdName = document.createElement("td");
+          const strong = document.createElement("div");
+          strong.textContent = row.display || row.umo;
+          const umoEl = document.createElement("div");
+          umoEl.className = "mono";
+          umoEl.textContent = row.umo;
+          tdName.append(strong, umoEl);
+
+          const tdKind = document.createElement("td");
+          tdKind.textContent = row.kind_label || "-";
+
+          const tdPlatform = document.createElement("td");
+          tdPlatform.textContent = row.platform || "-";
+
+          const tdVoice = document.createElement("td");
+          if (row.source === "session") {
+            tdVoice.textContent = row.voice_name || row.voice;
+            const ownTag = document.createElement("span");
+            ownTag.className = "tag warn";
+            ownTag.textContent = "独立";
+            tdVoice.append(ownTag);
+          } else {
+            tdVoice.textContent = globalVoice || "（跟随默认）";
+          }
+          tdVoice.title = row.source === "session" ? row.voice : "跟着默认声线走";
+
+          const tdSource = document.createElement("td");
+          const srcTag = document.createElement("span");
+          srcTag.className = "tag" + (row.source === "session" ? " warn" : " ok");
+          srcTag.textContent = row.source === "session" ? "单独设置" : "跟随默认";
+          tdSource.append(srcTag);
+
+          const tdTime = document.createElement("td");
+          tdTime.className = "mono";
+          tdTime.textContent =
+            String(row.last_active || "").replace("T", " ").slice(0, 16) || "-";
+
+          const tdOps = document.createElement("td");
+          const input = document.createElement("input");
+          input.setAttribute("list", "scopeVoiceList");
+          input.placeholder = "换成…";
+          input.style.width = "120px";
+
+          const btnSet = document.createElement("button");
+          btnSet.className = "ghost small";
+          btnSet.textContent = "切换";
+          btnSet.onclick = () => {
+            const voice = (input.value || "").trim();
+            if (!voice) {
+              toast("先在左边的框里填一条声线", true);
+              return;
+            }
+            applyScope(
+              { target: "session", umo: row.umo, voice },
+              `「${row.display}」已换成 ${voice}`
+            );
+          };
+
+          const btnReset = document.createElement("button");
+          btnReset.className = "ghost small";
+          btnReset.textContent = "跟随默认";
+          btnReset.disabled = row.source !== "session";
+          btnReset.onclick = () =>
+            applyScope(
+              { target: "session", umo: row.umo, clear: true },
+              `「${row.display}」已回到默认声线`
+            );
+
+          const btnTry = document.createElement("button");
+          btnTry.className = "ghost small";
+          btnTry.textContent = "试听";
+          btnTry.onclick = () => {
+            const name =
+              row.source === "session"
+                ? row.voice_name || row.voice
+                : globalVoice;
+            if (!name) {
+              toast("这个会话跟随默认声线，但默认声线还没设置", true);
+              return;
+            }
+            preview({ name }, btnTry);
+          };
+
+          tdOps.append(input, btnSet, btnReset, btnTry);
+          tr.append(tdName, tdKind, tdPlatform, tdVoice, tdSource, tdTime, tdOps);
+          tbody.append(tr);
+        });
+      }
+
+      async function applyScope(payload, okMsg) {
+        if (isDemo) {
+          toast("预览模式不能改声线");
+          return;
+        }
+        try {
+          const data = await bridge.apiPost("panel/scope", payload);
+          if (!data || data.ok === false) {
+            throw new Error((data && data.error) || "没改成");
+          }
+          renderScope(data);
+          if (data.failed && data.failed.length) {
+            toast(
+              `${data.failed.length} 个会话没改成：${data.failed[0].error || ""}`,
+              true
+            );
+          } else {
+            toast(okMsg);
+          }
+        } catch (error) {
+          toast(String(error.message || error), true);
+        }
+      }
+
+      async function loadScope() {
+        if (isDemo) return;
+        try {
+          const data = await bridge.apiGet("panel/sessions");
+          if (data && data.ok) renderScope(data);
+        } catch (error) {
+          toast(String(error.message || error), true);
+        }
+      }
+
       async function scanSuppliers() {
         if (isDemo) {
           toast("预览模式：下面是示例数据");
@@ -1432,6 +1671,7 @@
         renderCatalog();
         renderOrphans();
         renderPorts();
+        loadScope();
       }
 
       function demoState() {
@@ -1579,12 +1819,43 @@
           ports: 1,
           ports_online: 0,
         };
+        state.scope = {
+          global: { provider_id: "示例-通义-flash", name: "示例A", enable: true },
+          sessions: [
+            {
+              umo: "demo:GroupMessage:100000001",
+              name: "示例群一",
+              display: "示例群一",
+              platform: "demo",
+              kind_label: "群聊",
+              session_id: "100000001",
+              voice: "示例-通义-plus",
+              voice_name: "示例B",
+              source: "session",
+              last_active: "2026-11-08 23:10:00",
+            },
+            {
+              umo: "demo:FriendMessage:100000002",
+              name: "示例好友",
+              display: "示例好友",
+              platform: "demo",
+              kind_label: "私聊",
+              session_id: "100000002",
+              voice: "",
+              voice_name: "",
+              source: "global",
+              last_active: "2026-11-08 20:02:00",
+            },
+          ],
+          stats: { total: 2, overridden: 1, following: 1 },
+        };
         fillSettings();
         render();
         renderCatalog();
         renderOrphans();
         renderPorts();
         renderScan(state);
+        renderScope();
         toast("预览模式：没有连上 AstrBot，下面是示例数据");
       }
 
@@ -1706,6 +1977,37 @@
           toast(String(error.message || error), true);
         }
       };
+      document.getElementById("scopeSearch").oninput = renderScopeRows;
+      document.getElementById("scopeOnlyOverride").onchange = renderScopeRows;
+      document.getElementById("btnRefreshScope").onclick = async () => {
+        await loadScope();
+        toast("会话列表已刷新");
+      };
+      document.getElementById("btnSetGlobal").onclick = () => {
+        const voice = (document.getElementById("scopeVoice").value || "").trim();
+        if (!voice) {
+          toast("先填一条声线（提示框里可以选）", true);
+          return;
+        }
+        applyScope({ target: "global", voice }, `默认声线已改为 ${voice}`);
+      };
+      document.getElementById("btnSetAll").onclick = () => {
+        const voice = (document.getElementById("scopeVoice").value || "").trim();
+        if (!voice) {
+          toast("先填一条声线（提示框里可以选）", true);
+          return;
+        }
+        applyScope(
+          { target: "all", voice },
+          `所有会话都改用 ${voice}，单独设置已清空`
+        );
+      };
+      document.getElementById("btnClearAll").onclick = () =>
+        applyScope(
+          { target: "all", clear: true },
+          "已清空所有会话的单独设置，全部回到默认声线"
+        );
+
       // 刷新提示：关掉之后同浏览器不再弹（只记在本机，不影响别人）
       const TIP_KEY = "astrbot_tts_switcher.hide_refresh_tip";
       const refreshTip = document.getElementById("refreshTip");

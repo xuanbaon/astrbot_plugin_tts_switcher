@@ -969,6 +969,337 @@ def _normalize_voices(payload: Any) -> list[dict]:
     return result
 
 
+# ------------------------------------------------------------ 会话声线（面板里
+# 等价执行 /tts <名字>、/tts=全局 <名字>：默认声线、单个会话、全部会话）
+
+TTS_PREF_KEY = "provider_perf_text_to_speech"
+SESSION_CFG_KEY = "session_service_config"
+CURR_TTS_KEY = "curr_provider_tts"
+
+_KIND_LABEL = {
+    "FriendMessage": "私聊",
+    "GroupMessage": "群聊",
+    "GuildMessage": "频道",
+    "TempMessage": "临时会话",
+    "OtherMessage": "其他",
+}
+
+
+def _tts_type() -> Any:
+    """核心的 ProviderType.TEXT_TO_SPEECH（拿不到就返回 None，走偏好兜底）。"""
+    for path in ("astrbot.api.provider", "astrbot.core.provider.entities"):
+        try:
+            module = __import__(path, fromlist=["ProviderType"])
+            return module.ProviderType.TEXT_TO_SPEECH
+        except Exception:
+            continue
+    return None
+
+
+def _prefs(plugin: Any) -> Any:
+    """核心的 shared_preferences 实例。"""
+    try:
+        from astrbot.core import sp as _sp
+
+        if _sp is not None:
+            return _sp
+    except Exception:
+        pass
+    return getattr(getattr(plugin, "context", None), "shared_preferences", None)
+
+
+def _unwrap_pref(value: Any) -> str:
+    """偏好表里存的是 {"val": "..."} 这种结构，拆出真正的值。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("val") or "").strip()
+    return str(value or "").strip()
+
+
+def _parse_umo(umo: str) -> dict:
+    parts = str(umo or "").split(":")
+    kind = parts[1] if len(parts) > 1 else ""
+    return {
+        "platform": parts[0] if parts else "",
+        "kind": kind,
+        "kind_label": _KIND_LABEL.get(kind, kind or "会话"),
+        "session_id": ":".join(parts[2:]) if len(parts) > 2 else "",
+    }
+
+
+async def _db_select(plugin: Any, sql: str, params: dict | None = None) -> list[dict]:
+    """跑一条只读 SQL；数据库不可用就返回空列表（面板不至于整页挂掉）。"""
+    getter = getattr(getattr(plugin, "context", None), "get_db", None)
+    if not callable(getter):
+        return []
+    try:
+        db = getter()
+    except Exception:
+        return []
+    if db is None:
+        return []
+    try:
+        from sqlalchemy import text as sql_text
+    except Exception:
+        return []
+    try:
+        async with db.get_db() as session:
+            result = await session.execute(sql_text(sql), params or {})
+            return [dict(row) for row in result.mappings().all()]
+    except Exception as exc:
+        logger.debug("[tts_switcher] 查询会话数据失败: %s", exc)
+        return []
+
+
+def _voice_label(plugin: Any, provider_id: str) -> str:
+    """提供商 ID → 声线名字（没映射过就用 ID 本身）。"""
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return ""
+    low = pid.lower()
+    for row in _voice_rows(plugin):
+        if row["provider_id"].lower() == low:
+            return row["name"] or pid
+    return pid
+
+
+def _resolve_voice(plugin: Any, text: str) -> dict | None:
+    """按 名字 / 提供商 ID / 别名 / 唯一模糊 找一条声线。"""
+    key = str(text or "").strip()
+    if not key:
+        return None
+    low = key.lower()
+    rows = _voice_rows(plugin)
+    for row in rows:
+        if row["name"].lower() == low or row["provider_id"].lower() == low:
+            return row
+    for row in rows:
+        aliases = [a.strip().lower() for a in re.split(r"[,，、;；|]", row["alias"]) if a.strip()]
+        if low in aliases:
+            return row
+    hits = [row for row in rows if low in row["name"].lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _global_tts(plugin: Any) -> dict:
+    """主配置里的默认声线（面板「AI → 语音回复 → 默认文本转语音模型」那一项）。"""
+    cfg = None
+    getter = getattr(getattr(plugin, "context", None), "get_config", None)
+    if callable(getter):
+        try:
+            cfg = getter()
+        except Exception:
+            cfg = None
+    section = {}
+    if isinstance(cfg, dict):
+        raw = cfg.get("provider_tts_settings")
+        section = raw if isinstance(raw, dict) else {}
+    pid = str(section.get("provider_id") or "").strip()
+    return {
+        "provider_id": pid,
+        "name": _voice_label(plugin, pid) if pid else "",
+        "enable": _as_bool(section.get("enable", True), True),
+    }
+
+
+async def _session_catalog(plugin: Any) -> dict:
+    """把「有记录的会话」整理成一张表：名字、平台、当前声线、来源。"""
+    override_rows = await _db_select(
+        plugin,
+        "select scope_id, value, updated_at from preferences "
+        "where key = :k and scope = 'umo'",
+        {"k": TTS_PREF_KEY},
+    )
+    alias_rows = await _db_select(
+        plugin, "select umo, auto_name, user_alias from umo_aliases"
+    )
+    conv_rows = await _db_select(
+        plugin,
+        "select user_id, max(updated_at) as last_active from conversations "
+        "group by user_id",
+    )
+    sel_rows = await _db_select(
+        plugin,
+        "select scope_id, updated_at from preferences where key = 'sel_conv_id'",
+    )
+
+    table: dict[str, dict] = {}
+
+    def touch(umo: str) -> dict | None:
+        umo = str(umo or "").strip()
+        if not umo or ":" not in umo:
+            return None
+        row = table.get(umo)
+        if row is None:
+            row = {"umo": umo, "name": "", "voice": "", "last_active": ""}
+            row.update(_parse_umo(umo))
+            table[umo] = row
+        return row
+
+    for item in override_rows:
+        row = touch(item.get("scope_id") or "")
+        if row is not None:
+            row["voice"] = _unwrap_pref(item.get("value"))
+            row["override_at"] = str(item.get("updated_at") or "")
+
+    for item in alias_rows:
+        row = touch(item.get("umo") or "")
+        if row is not None:
+            row["name"] = str(
+                item.get("user_alias") or item.get("auto_name") or ""
+            ).strip()
+
+    for item in conv_rows:
+        row = touch(item.get("user_id") or "")
+        if row is not None and item.get("last_active"):
+            row["last_active"] = str(item["last_active"])
+
+    for item in sel_rows:
+        row = touch(item.get("scope_id") or "")
+        if row is not None and item.get("updated_at"):
+            stamp = str(item["updated_at"])
+            if stamp > row["last_active"]:
+                row["last_active"] = stamp
+
+    sessions = []
+    for row in table.values():
+        voice = row.get("voice") or ""
+        row["voice_name"] = _voice_label(plugin, voice) if voice else ""
+        row["source"] = "session" if voice else "global"
+        row["display"] = row["name"] or f"{row['kind_label']} {row['session_id']}"
+        sessions.append(row)
+
+    sessions.sort(
+        key=lambda r: (
+            0 if r["source"] == "session" else 1,
+            r["last_active"] or "",
+            r["display"],
+        ),
+        reverse=False,
+    )
+    # 最近活跃的排前面：先按「有没有单独设置」分组，组内按时间倒序
+    sessions.sort(key=lambda r: r["last_active"] or "", reverse=True)
+    sessions.sort(key=lambda r: 0 if r["source"] == "session" else 1)
+
+    return {
+        "global": _global_tts(plugin),
+        "sessions": sessions,
+        "stats": {
+            "total": len(sessions),
+            "overridden": sum(1 for r in sessions if r["source"] == "session"),
+            "following": sum(1 for r in sessions if r["source"] == "global"),
+        },
+    }
+
+
+async def _set_global_voice(plugin: Any, provider_id: str) -> tuple[bool, str]:
+    """等价 /tts=全局：写主配置 + 同步内存态 + 记全局偏好。"""
+    cfg = None
+    getter = getattr(getattr(plugin, "context", None), "get_config", None)
+    if callable(getter):
+        try:
+            cfg = getter()
+        except Exception:
+            cfg = None
+    if not isinstance(cfg, dict):
+        return False, "拿不到主配置，改不了默认声线"
+
+    try:
+        section = cfg.get("provider_tts_settings")
+        if not isinstance(section, dict):
+            section = {}
+            cfg["provider_tts_settings"] = section
+        section["provider_id"] = provider_id
+        section["enable"] = True
+        saver = getattr(cfg, "save_config_async", None)
+        if callable(saver):
+            await saver()
+        else:
+            saver = getattr(cfg, "save_config", None)
+            if callable(saver):
+                saver()
+    except Exception as exc:
+        logger.error("[tts_switcher] 面板写全局声线失败: %s", exc, exc_info=True)
+        return False, f"写配置失败：{exc}"
+
+    manager = getattr(plugin.context, "provider_manager", None)
+    if manager is not None:
+        try:
+            instance = await manager.get_provider_by_id(provider_id)
+            if instance is not None:
+                manager.curr_tts_provider_inst = instance
+            settings = getattr(manager, "provider_tts_settings", None)
+            if isinstance(settings, dict):
+                settings["provider_id"] = provider_id
+                settings["enable"] = True
+        except Exception as exc:
+            logger.debug("[tts_switcher] 同步默认声线到内存失败: %s", exc)
+
+    prefs = _prefs(plugin)
+    if prefs is not None:
+        try:
+            await prefs.put_async(
+                key=CURR_TTS_KEY, value=provider_id, scope="global", scope_id="global"
+            )
+        except Exception as exc:
+            logger.debug("[tts_switcher] 写全局偏好失败: %s", exc)
+    return True, ""
+
+
+async def _set_session_voice(plugin: Any, umo: str, provider_id: str) -> tuple[bool, str]:
+    """等价 /tts <名字>：只影响这个会话。"""
+    manager = getattr(plugin.context, "provider_manager", None)
+    provider_type = _tts_type()
+    done = False
+    if manager is not None and provider_type is not None:
+        try:
+            await manager.set_provider(
+                provider_id=provider_id, provider_type=provider_type, umo=umo
+            )
+            done = True
+        except Exception as exc:
+            logger.error("[tts_switcher] 面板设置会话声线失败: %s", exc, exc_info=True)
+            return False, f"写入失败：{exc}"
+    if not done:
+        prefs = _prefs(plugin)
+        if prefs is None:
+            return False, "核心没有 shared_preferences，改不了会话声线"
+        try:
+            await prefs.session_put(umo, TTS_PREF_KEY, provider_id)
+        except Exception as exc:
+            return False, f"写入失败：{exc}"
+
+    # 和 /tts 一样顺手把会话语音开关打开，免得切了没声音
+    if _as_bool(plugin.config.get("access.auto_enable", True), True):
+        prefs = _prefs(plugin)
+        if prefs is not None:
+            try:
+                conf = await prefs.session_get(umo, SESSION_CFG_KEY, {}) or {}
+                if not isinstance(conf, dict):
+                    conf = {}
+                conf["tts_enabled"] = True
+                await prefs.session_put(umo, SESSION_CFG_KEY, conf)
+            except Exception as exc:
+                logger.debug("[tts_switcher] 打开会话语音失败: %s", exc)
+    return True, ""
+
+
+async def _clear_session_voice(plugin: Any, umo: str) -> tuple[bool, str]:
+    """等价 /tts 默认：清掉会话覆盖，回到默认声线。"""
+    prefs = _prefs(plugin)
+    if prefs is None:
+        return False, "核心没有 shared_preferences，清不了会话声线"
+    try:
+        await prefs.session_remove(umo, TTS_PREF_KEY)
+    except Exception as exc:
+        return False, f"清除失败：{exc}"
+    return True, ""
+
+
 def register_web_apis(plugin: Any) -> None:
     """把面板要用的接口挂到核心上。"""
     context = plugin.context
@@ -1363,6 +1694,130 @@ def register_web_apis(plugin: Any) -> None:
             pass
         return jsonify(state)
 
+    async def api_sessions():
+        """会话声线总览：默认声线 + 每个会话现在用的是哪条、是不是单独指定过。"""
+        try:
+            data = await _session_catalog(plugin)
+        except Exception as exc:
+            logger.error("[tts_switcher] 读取会话声线失败: %s", exc, exc_info=True)
+            return jsonify({"ok": False, "error": f"读取失败：{exc}"}), 500
+        data["ok"] = True
+        return jsonify(data)
+
+    async def api_scope():
+        """面板里执行 /tts 与 /tts=全局：
+
+        target = global  改默认声线（所有没有单独设置的会话都跟着变）
+        target = session 只改某个会话
+        target = all     全部会话都用它（改默认 + 清空所有会话覆盖）
+        clear = true     清掉会话覆盖，回到默认（session / all 可用）
+        """
+        payload = await _read_json()
+        target = str(payload.get("target") or "session").strip().lower()
+        clear = _as_bool(payload.get("clear", False), False)
+
+        voice = None
+        if not clear:
+            voice = _resolve_voice(plugin, str(payload.get("voice") or ""))
+            if voice is None:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": "没找到这条声线：名字、提供商 ID、别名都对不上"
+                            f"（填的是「{payload.get('voice')}」）",
+                        }
+                    ),
+                    400,
+                )
+            if not clear:
+                # 声线绑定的提供商可能已被删掉，先挡住，别写出一个哑巴设置
+                if plugin._resolve_provider(voice["provider_id"]) is None:
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "error": f"声线「{voice['name']}」的提供商"
+                                f"「{voice['provider_id']}」现在没在跑，先把它启用再切",
+                            }
+                        ),
+                        400,
+                    )
+
+        provider_id = voice["provider_id"] if voice else ""
+        applied: list[dict] = []
+        failed: list[dict] = []
+        cleared = 0
+
+        if target == "global":
+            ok, err = await _set_global_voice(plugin, provider_id)
+            if not ok:
+                return jsonify({"ok": False, "error": err}), 500
+            applied.append({"scope": "global", "provider_id": provider_id})
+
+        elif target == "session":
+            umo = str(payload.get("umo") or "").strip()
+            if not umo:
+                return jsonify({"ok": False, "error": "缺少会话标识"}), 400
+            if clear:
+                ok, err = await _clear_session_voice(plugin, umo)
+                if ok:
+                    cleared += 1
+                    applied.append({"scope": "session", "umo": umo, "cleared": True})
+                else:
+                    failed.append({"umo": umo, "error": err})
+            else:
+                ok, err = await _set_session_voice(plugin, umo, provider_id)
+                if ok:
+                    applied.append(
+                        {"scope": "session", "umo": umo, "provider_id": provider_id}
+                    )
+                else:
+                    failed.append({"umo": umo, "error": err})
+
+        elif target == "all":
+            if not clear:
+                ok, err = await _set_global_voice(plugin, provider_id)
+                if not ok:
+                    return jsonify({"ok": False, "error": err}), 500
+                applied.append({"scope": "global", "provider_id": provider_id})
+            catalog = await _session_catalog(plugin)
+            for row in catalog["sessions"]:
+                if row["source"] != "session":
+                    continue
+                ok, err = await _clear_session_voice(plugin, row["umo"])
+                if ok:
+                    cleared += 1
+                else:
+                    failed.append({"umo": row["umo"], "error": err})
+            applied.append({"scope": "all_sessions", "cleared": cleared})
+
+        else:
+            return jsonify({"ok": False, "error": f"不认识的目标：{target}"}), 400
+
+        logger.info(
+            "[tts_switcher] 面板执行声线切换 target=%s voice=%s cleared=%d failed=%d",
+            target,
+            provider_id or "(清除)",
+            cleared,
+            len(failed),
+        )
+
+        state = await _session_catalog(plugin)
+        state.update(
+            {
+                # 部分失败也把最新状态回给页面，失败明细走 failed / error
+                "ok": True,
+                "target": target,
+                "applied": applied,
+                "failed": failed,
+                "cleared": cleared,
+            }
+        )
+        if failed:
+            state["error"] = f"{len(failed)} 个会话没改成"
+        return jsonify(state)
+
     async def api_preview():
         """试听：用指定声线合成一句话，返回 wav 的 base64 data URI。"""
         payload = await _read_json()
@@ -1412,6 +1867,8 @@ def register_web_apis(plugin: Any) -> None:
         ("panel/scan", api_scan, ["POST"], "面板：扫描供应商与当前音色"),
         ("panel/push", api_push, ["POST"], "面板：把声线音色写回供应商"),
         ("panel/pull", api_pull, ["POST"], "面板：从供应商回填声线音色"),
+        ("panel/sessions", api_sessions, ["GET"], "面板：列出会话与各自当前声线"),
+        ("panel/scope", api_scope, ["POST"], "面板：设置默认/单个/全部会话的声线"),
         ("panel/preview", api_preview, ["POST"], "面板：试听一条声线"),
     )
     for route, handler, methods, desc in routes:
